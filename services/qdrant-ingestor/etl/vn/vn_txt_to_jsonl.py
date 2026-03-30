@@ -190,6 +190,7 @@ def process_file(filepath: str, source_id: str | None = None) -> list[dict]:
 def process_directory(
     source_dir: str,
     output_path: str,
+    source_id: str | None = None,
     max_files: int | None = None,
     dry_run: bool = False,
     verbose: bool = False,
@@ -199,6 +200,7 @@ def process_directory(
     Args:
         source_dir: Path to directory containing .txt files.
         output_path: Path to output JSONL file.
+        source_id: Override source_id (otherwise from directory name).
         max_files: Maximum number of files to process (for pilot mode).
         dry_run: If True, don't write output.
         verbose: If True, print detailed progress.
@@ -214,8 +216,9 @@ def process_directory(
     if max_files:
         txt_files = txt_files[:max_files]
 
-    # Infer source_id from directory name
-    source_id = source_dir.name
+    # Infer source_id from directory name if not provided
+    if not source_id:
+        source_id = source_dir.name
 
     total_files = len(txt_files)
     total_records = 0
@@ -277,6 +280,7 @@ def main():
     )
     ap.add_argument("--source-dir", required=True, help="Directory with .txt files")
     ap.add_argument("--output", required=True, help="Output JSONL file path")
+    ap.add_argument("--source-id", required=False, help="Override source ID (default: infer from dir name)")
     ap.add_argument("--max-files", type=int, help="Max files to process (pilot mode)")
     ap.add_argument("--dry-run", action="store_true", help="Don't write output")
     ap.add_argument("--verbose", action="store_true", help="Print progress")
@@ -298,6 +302,7 @@ def main():
     summary = process_directory(
         source_dir=args.source_dir,
         output_path=args.output,
+        source_id=args.source_id,
         max_files=args.max_files,
         dry_run=args.dry_run,
         verbose=args.verbose,

@@ -35,7 +35,7 @@ services:
       KSERVE_BASE_URL: https://api.groq.com/openai
       KSERVE_COMPLETIONS_PATH: /v1/chat/completions
       LLM_MODEL_ID: llama-3.3-70b-versatile
-      LLM_API_KEY: <YOUR_GROQ_API_KEY>
+      LLM_API_KEY: [ENCRYPTION_KEY]
       LLM_MAX_TOKENS: "2048"
       LLM_TEMPERATURE: "0.3"
       LLM_TOP_P: "0.9"

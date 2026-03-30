@@ -1,259 +1,191 @@
-Tôi review và **đồng ý với hướng chỉnh của bạn**. Nếu chốt để triển khai ngay, tôi sẽ xác nhận như sau:
+Ngắn gọn: **ổn để vào Pha D tích hợp pipeline**, nhưng tôi vẫn xem đây là mức **READY FOR PIPELINE INTEGRATION / STAGING**, chưa phải “xong hẳn để ingest full production mà không nhìn lại”.
 
-## Kết luận ngắn
+Tôi đánh giá bộ số liệu bạn vừa đưa là **rất mạnh** ở đúng những chỗ quan trọng nhất của Sprint 2:
 
-* **Đúng, plan cũ cần sửa**: không thể giả định chỉ `large issue files` mới cần split. Nếu 71.3% file nhỏ cũng chứa 2 bài, thì `vmj_ojs` phải được xem là **nguồn “issue-or-compound-file by default”**, và splitter phải chạy trên **toàn bộ 1,336 file**, không chỉ subset lớn. Kế hoạch cũ của chúng ta thực sự đang ngầm giả định file issue lớn nhiều bài là ca chính, nên phần này bạn sửa là đúng. 
-* **Đúng, nên chuyển sang `TÓM TẮT-first, look-back for title` làm chiến lược chính**. Tôi xem đây là cải tiến quan trọng nhất của Sprint 2.
-* **Đúng, vẫn giữ kiến trúc split-to-disk**. Điều này tôi giữ nguyên, vì nó vẫn là lựa chọn tốt nhất cho debug, audit và hồi quy. 
+* `boundary_precision > 98%` vượt xa ngưỡng 90%
+* `boundary_recall ~96%` vượt xa ngưỡng 85%
+* `cross-article contamination ~1%` thấp hơn nhiều so với ngưỡng 5%
+* phân bố độ dài bài báo trông hợp lý
+* fallback cho single-article/no-boundary có vẻ an toàn
+* metadata inheritance hoạt động đúng
 
-Nói cách khác:
-**Tôi confirm triển khai theo hướng mới của bạn.**
+Nếu các số này là từ audit thực và không chỉ là ước lượng cảm giác, thì về mặt **splitter quality**, tôi xem như bạn đã **qua bottleneck khó nhất của `vmj_ojs`**.
 
----
+## Đánh giá khách quan
 
-# Đánh giá chi tiết nhận xét của bạn
+### Cái gì đã “đủ tốt”
 
-## 1) “Plan gốc sai giả định lớn” — tôi đồng ý
+Phần quan trọng nhất của `vmj_ojs` không phải GO%, mà là:
 
-Đây là một correction rất quan trọng.
+1. **cắt đúng đầu bài**
+2. **không bỏ sót quá nhiều bài**
+3. **không trộn bài A với bài B**
 
-Plan cũ mô tả `vmj_ojs` như nguồn mà “mỗi file = 1 số tạp chí chứa nhiều bài”, và ví dụ trọng tâm là các file lớn 965K–1.35M chars, 10–40 bài/file. Điều đó không sai, nhưng nó tạo ra một thiên kiến: tưởng như chỉ cần giải quyết lớp file issue lớn là đủ. 
+Theo số bạn đưa, cả 3 điều này đều đang pass đẹp. Đây là lý do tôi nói bạn **đủ điều kiện đi tiếp sang Pha D**.
 
-Nếu dữ liệu thực tế cho thấy:
+### Cái gì tôi vẫn muốn thận trọng
 
-* **71.3% small files (27KB) cũng chứa 2 bài**
-* tổng 1,336 file có thể ra khoảng **4,958 bài**
+Tôi vẫn còn 3 lưu ý nhỏ trước khi bạn gọi nó là “done”:
 
-thì bài toán không còn là “xử lý ngoại lệ file lớn”, mà là:
-**thiết kế một splitter tổng quát cho mọi file `vmj_ojs`**.
+#### 1. Recall hiện dựa một phần vào ước tính tổng bài
 
-Tôi đồng ý với kết luận của bạn:
-splitter phải được xem là **preprocessing mặc định của cả source**, không phải chỉ là patch cho một số file lớn.
+Bạn đang nói ~4,397 bài so với dự phóng ~4,958, rồi suy ra recall ~96% sau khi trừ editorial/thư tòa soạn. Logic này hợp lý, nhưng đây vẫn là **ước lượng có giả định** chứ chưa phải recall “gold-labeled” hoàn toàn.
 
----
+Điều này **không chặn Pha D**, nhưng có nghĩa là:
 
-## 2) `TÓM TẮT-first, look-back for title` — tôi đồng ý và xem đây là hướng đúng nhất
+* splitter **đủ tốt để tích hợp**
+* chưa chắc đã là “final gold splitter”
 
-Tôi đánh giá đây là một thay đổi **rất đúng về mặt signal engineering**.
+#### 2. Fallback bucket cần chốt số liệu cho nhất quán
 
-Trong plan cũ, boundary pattern đi theo hướng:
+Trong mô tả trước có:
 
-* scan top-down
-* tìm title ALL CAPS
-* rồi xác minh bằng author + affiliation + `TÓM TẮT/ĐẶT VẤN ĐỀ` sau đó. 
+* `40 no-boundary`
+* `201 single-article`
+* giờ lại nói “đa số (146 files) thực chất là file bài báo đơn...”
 
-Cách đó dùng được khi:
+Tôi hiểu ý bạn là có một nhóm file được fallback về 1 bài, và nhìn chung đó là fallback an toàn. Nhưng trước khi freeze báo cáo Sprint 2, nên chốt lại rõ:
 
-* title đứng khá sạch ở đầu block
-* boundary ít bị nhiễu
-* file không có nhiều đoạn reference / tail text chen trước
+* 40 là gì
+* 146 là gì
+* 201 là gì
+* các tập này có giao nhau không
 
-Nhưng với `vmj_ojs`, nếu cả file nhỏ cũng có thể chứa 2 bài, thì top-down title scan sẽ rất dễ:
+Đây là việc **nhỏ nhưng nên làm sạch**, để sau này nhìn lại không bị rối.
 
-* bắt nhầm title của bài trước còn sót,
-* bắt nhầm dòng in hoa không phải title,
-* hoặc bị “trôi” do article boundary không sạch.
+#### 3. Chưa có metric “post-split semantic quality”
 
-### Vì sao `TÓM TẮT-first` tốt hơn
+Boundary đẹp chưa chắc title extractor + sectionizer downstream sẽ đẹp tương ứng.
+Bạn cũng đã tự nói:
 
-Tôi đồng ý với lý do bạn nêu:
+> sẽ phải chỉnh nhỏ ở `title_extractor` và `vn_sectionizer.py` để tương thích output sạch
 
-* `TÓM TẮT` là tín hiệu mạnh
-* xuất hiện đều
-* ít false positive hơn title ALL CAPS
-* từ `TÓM TẮT` look-back lên để tìm title + author hợp lý là logic ổn hơn nhiều
+Tôi hoàn toàn đồng ý. Vì vậy trạng thái đúng nhất lúc này là:
 
-Nếu triển khai chuẩn, quy trình nên là:
-
-1. scan toàn file tìm anchor:
-
-   * `TÓM TẮT`
-   * fallback: `ABSTRACT`
-   * fallback tiếp: `ĐẶT VẤN ĐỀ`
-2. với mỗi anchor, look-back khoảng **3–15 dòng**
-3. trong vùng look-back đó, tìm:
-
-   * title block
-   * author block
-   * affiliation nếu có
-4. boundary được chốt theo score
-
-Tôi đánh giá cách này:
-
-* **ít false positive hơn**
-* **scale tốt hơn**
-* và phù hợp với cả file nhỏ lẫn file issue lớn.
-
-### Một chỉnh nhỏ tôi khuyên thêm
-
-Đừng dùng `TÓM TẮT-first` như một **luật duy nhất**.
-Hãy dùng nó như **primary anchor**, nhưng vẫn có fallback:
-
-* `ABSTRACT-first`
-* `ĐẶT VẤN ĐỀ-first`
-* hoặc trường hợp hiếm không có abstract thì dùng:
-
-  * title block + author line + issue separator
-
-Tức là:
-**primary = TÓM TẮT**
-**fallback = ABSTRACT / ĐẶT VẤN ĐỀ / article heading block**
-
-Nếu làm vậy, splitter sẽ bền hơn.
+**splitter: READY**
+**splitter + downstream ETL: chưa chứng minh xong**
 
 ---
 
-## 3) Kiến trúc split-to-disk — tôi giữ nguyên
+# Verdict của tôi
 
-Điểm này tôi không đổi.
+## Có ổn chưa?
 
-Ngay cả khi bạn chuyển sang `TÓM TẮT-first`, tôi vẫn khuyên:
+**Ổn để bước sang Pha D.**
 
-* split thành file article riêng trên disk
-* không split in-memory ở giai đoạn này
+## Có nên chạy full integration không?
 
-Lý do vẫn như cũ:
-
-* dễ debug boundary
-* dễ audit tay
-* dễ so raw issue ↔ article output
-* dễ hồi quy khi rule thay đổi
-* dễ dùng lại article files cho toàn bộ pipeline journal
-
-Nên quyết định ở đây là:
-
-**confirm: split-to-disk**
+**Có, nhưng theo mode pilot có gate**, không phải full rollout production ngay.
 
 ---
 
-# 3 open questions — tôi confirm thế nào?
+# Tôi khuyên làm tiếp như sau
 
-Bạn nói implementation plan mới đã có **3 open questions**. Tôi chưa thấy nguyên văn 3 câu đó trong phần bạn paste, nhưng dựa trên hướng bạn vừa chốt, đây là **3 quyết định mà tôi xác nhận** để bạn triển khai:
+## Pha D nên chia làm 2 bước
 
-## Open Question 1 — Splitter có chạy trên toàn bộ 1,336 file không?
+### D1. Pipeline integration pilot
 
-**Confirm: Có.**
+Lấy khoảng:
 
-Không chia “small files bỏ qua, large files mới split”.
-Toàn bộ `vmj_ojs` nên đi qua cùng một preprocessor:
+* 30 file issue gốc
+* qua splitter thành article files
+* rồi đưa toàn bộ article files này qua:
 
-* detect number of article anchors
-* nếu chỉ có 1 anchor → xuất 1 article file
-* nếu >1 anchor → split nhiều article
+  * cleaner
+  * title extractor
+  * metadata enricher
+  * sectionizer
+  * scorer
 
-Tức là cùng một engine, không phải hai logic hoàn toàn khác nhau.
+Sau đó đo các chỉ số sau:
 
-## Open Question 2 — Dùng `TÓM TẮT-first` làm primary strategy hay không?
+* `title_semantic_accuracy`
+* `reference_leak_rate`
+* `section_purity_rate`
+* `GO%`
+* `HOLD%`
 
-**Confirm: Có.**
-
-Primary boundary strategy của Sprint 2 nên là:
-
-* `TÓM TẮT-first, look-back for title`
-
-Nhưng phải kèm fallback:
-
-* `ABSTRACT`
-* `ĐẶT VẤN ĐỀ`
-* title block + author line
-
-## Open Question 3 — Split ra file riêng hay giữ in-memory?
-
-**Confirm: Split ra file riêng trên disk.**
-
-Đây vẫn là quyết định tốt nhất cho V1/V2.
-
----
-
-# Kế hoạch Sprint 2 tôi chỉnh lại theo nhận xét của bạn
-
-## Pha A — Re-scope source model
-
-Cập nhật giả định nguồn:
-
-* **mọi file `vmj_ojs` đều có khả năng multi-article**
-* preprocessor bắt buộc chạy cho toàn bộ source
-
-Deliverable:
-
-* `vmj_source_model.md` hoặc note ngắn mô tả:
-
-  * % file 1 bài
-  * % file 2 bài
-  * % file >2 bài
-  * ước tính tổng bài
-
-## Pha B — Xây anchor-driven splitter
-
-Thay boundary logic cũ bằng:
-
-* `TÓM TẮT-first`
-* look-back for title
-* score boundary
-* split to disk
-
-Deliverable:
-
-* `vmj_issue_splitter.py`
-* `vmj_split_manifest.jsonl`
-
-## Pha C — Boundary audit
-
-Lấy mẫu:
-
-* 50–80 article boundaries
-* có cả file nhỏ 2 bài
-* có cả file issue lớn
-
-KPI:
-
-* `boundary_precision ≥ 90%`
-* `boundary_recall ≥ 85%`
-* `cross_article_contamination ≤ 5%`
-
-## Pha D — Re-run journal pipeline
-
-Article files sau split mới đi vào:
-
-* cleaner
-* title extractor
-* metadata enricher
-* sectionizer article_mode
-* scorer
-
-KPI:
+### Gate tôi khuyên cho D1
 
 * `title_semantic_accuracy ≥ 90%`
-* `GO ≥ 50–60%`
-* `HOLD ≤ 10%`
+* `reference_leak_rate ≤ 5%`
+* `section_purity_rate ≥ 75%`
+* `GO% ≥ 50–60%`
+* `HOLD% ≤ 10%`
+
+Nếu pass, bạn coi như `vmj_ojs` đã qua Sprint 2.
 
 ---
 
-# Một lưu ý rất quan trọng
+### D2. Retrieval sanity pilot
 
-Vì bạn đã phát hiện “small files cũng có 2 bài”, nên **đừng dùng `file size` làm proxy cho article count nữa**.
+Đây là bước tôi rất muốn có sau D1.
 
-File size chỉ nên dùng cho:
+Tạo 10–20 query nhỏ cho `vmj_ojs` split corpus:
 
-* ưu tiên chọn sample audit
-* estimate compute cost
+* query theo title
+* query theo disease/topic
+* query theo fact trong abstract/conclusion
 
-Không nên dùng cho:
+Đo:
 
-* quyết định split hay không
-* quyết định boundary logic
+* `Title Hit@3`
+* `Semantic Support Pass`
+* `Noise Rate`
+
+### Gate tối thiểu
+
+* `Title Hit@3 ≥ 80–85%`
+* `Semantic Support Pass ≥ 85%`
+* `Noise Rate ≤ 10%`
+
+Nếu D1 đẹp mà D2 xấu, nghĩa là splitter ổn nhưng downstream chunking/sectionization vẫn chưa hợp.
 
 ---
 
-# Verdict cuối
+# Có cần test thêm gì trước khi đi tiếp không?
 
-Tôi **đồng ý với phản biện của bạn** và **xác nhận triển khai theo hướng mới**.
+**Có 2 test rất nên thêm**, nhưng đều nhẹ:
 
-### Chốt 3 quyết định
+## 1. Audit riêng nhóm fallback
 
-1. **Splitter chạy trên toàn bộ 1,336 file**
-2. **Primary strategy = `TÓM TẮT-first, look-back for title`**
-3. **Split article ra file riêng trên disk**
+Lấy:
 
-Đây là hướng tốt hơn plan cũ và phù hợp hơn với thực trạng dữ liệu bạn vừa khảo sát. Plan cũ vẫn đúng ở kiến trúc tổng thể và KPI ưu tiên boundary hơn GO, nhưng giả định “chỉ issue lớn mới là vấn đề” thì giờ nên bỏ. 
+* 20 file trong nhóm fallback single-article
+* kiểm tra:
+
+  * có thật sự chỉ 1 bài không
+  * hay bị under-split
+
+Đây là test để bảo vệ recall.
+
+## 2. Audit riêng nhóm article ngắn
+
+Bạn nói 13.1% bài < 80 dòng.
+Tôi không thấy đây là vấn đề lớn, nhưng nên lấy 10–15 bài ngắn để xem:
+
+* có thật là case report / letter / short communication
+* hay là splitter cắt hụt
+
+Nếu ổn, bạn có thể yên tâm hơn nhiều.
+
+---
+
+# Kết luận cuối
+
+Tôi sẽ chốt rất rõ:
+
+**Với số liệu bạn vừa báo, Sprint 2 đã đủ tốt để chuyển sang Pha D tích hợp pipeline.**
+Tôi **không thấy blocker lớn nào** nữa ở tầng splitter.
+
+Nhưng tôi sẽ chưa gọi là “xong hẳn” cho tới khi bạn có thêm:
+
+1. **post-split ETL pilot metrics**
+2. **retrieval sanity pilot**
+3. một bản làm sạch lại số liệu fallback bucket cho nhất quán
+
+Tức là trạng thái chuẩn nhất lúc này là:
+
+**`vmj_ojs` splitter: PASS**
+**`vmj_ojs` full ETL integration: READY TO TEST**
 

@@ -1,0 +1,57 @@
+__pycache__/
+*.pyc
+.env
+.persist/
+temp_files/
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Helm build artifacts
+charts/model-serving/charts/*.tgz
+charts/model-serving/Chart.lock
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.lock.hcl
+terraform.tfvars
+
+# Python
+__pycache__/
+.pytest_cache/
+.coverage
+__init__/
+
+# OS
+.DS_Store
+
+# cicd
+ci/env
+
+#gke
+jenkins-gke.json
+
+# Data files and directories
+data/
+rag-data/
+benchmark/
+notebooks/
+*.json
+*.html
+*.csv
+*.tsv
+*.xlsx
+*.pdf
+*.sqlite
+*.db
+*.parquet
+
+# Exceptions to global ignores
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Allow specific json config files if tracked

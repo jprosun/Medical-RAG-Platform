@@ -1,0 +1,53 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-ingestion
+  labels:
+    app: qdrant-ingestion
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: qdrant-ingestion
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: qdrant-ingestion
+          image: "{{ .Values.ingestion.image.repository }}:{{ .Values.ingestion.image.tag }}"
+          imagePullPolicy: {{ .Values.ingestion.image.pullPolicy }}
+
+          args:
+            - "--qdrant-url"
+            - {{ index .Values "rag-orchestrator" "env" "QDRANT_URL" | quote }}
+            - "--collection"
+            - {{ index .Values "rag-orchestrator" "env" "QDRANT_COLLECTION" | quote }}
+            - "--embedding-model"
+            - {{ .Values.ingestion.embeddingModel | quote }}
+            - "--source-name"
+            - {{ .Values.ingestion.sourceName | quote }}
+            - "--top-level-path"
+            - "/data"
+            - "--input-path"
+            - "."
+            - "--patterns"
+            - {{ .Values.ingestion.patterns | quote }}
+            - "--chunk-size"
+            - {{ .Values.ingestion.chunkSize | quote }}
+            - "--overlap"
+            - {{ .Values.ingestion.overlap | quote }}
+            - "--batch-size"
+            - {{ .Values.ingestion.batchSize | quote }}
+
+          volumeMounts:
+            - name: docs
+              mountPath: /data
+              readOnly: true
+
+      volumes:
+        - name: docs
+          configMap:
+            name: medical-docs
+{{- end }}

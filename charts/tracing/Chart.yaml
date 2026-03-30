@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tracing
+description: OpenTelemetry Collector + Jaeger tracing stack for LLM-MedQA
+type: application
+version: 0.1.0
+appVersion: "1.0"

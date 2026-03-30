@@ -1,0 +1,5 @@
+apiVersion: v2
+name: redis
+type: application
+version: 0.1.0
+appVersion: "7.2"

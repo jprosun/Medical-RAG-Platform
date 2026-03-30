@@ -1,0 +1,21 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: {{.Values.namespace}}
+  # annotations:
+  #   kubernetes.io/ingress.class: "nginx-observe"
+spec:
+  ingressClassName: nginx-observe
+  rules:
+    - http:
+        paths:
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: {{ .Values.grafana.service.port }}
+{{- end }}

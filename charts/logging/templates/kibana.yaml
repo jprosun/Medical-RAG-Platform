@@ -1,0 +1,37 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: {{ .Values.kibana.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: http://elasticsearch.logging.svc.cluster.local:9200
+            - name: XPACK_SECURITY_ENABLED
+              value: "false"
+            # -----------------------------
+            # ingress params
+            # -----------------------------
+            - name: SERVER_BASEPATH
+              value: "/kibana"
+            - name: SERVER_REWRITEBASEPATH
+              value: "true"
+          ports:
+            - containerPort: 5601
+          resources:
+            {{- toYaml .Values.kibana.resources | nindent 12 }}
+{{- end }}

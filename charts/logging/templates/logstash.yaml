@@ -1,0 +1,33 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+        - name: logstash
+          image: {{ .Values.logstash.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5044
+              name: beats
+          resources:
+            {{- toYaml .Values.logstash.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /usr/share/logstash/pipeline
+      volumes:
+        - name: config
+          configMap:
+            name: logstash-config
+{{- end }}

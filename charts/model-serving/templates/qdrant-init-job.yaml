@@ -1,0 +1,53 @@
+{{- if and .Values.qdrant.enabled .Values.qdrant.initJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-init
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: qdrant-init
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: QDRANT_URL
+              value: {{ index .Values "rag-orchestrator" "env" "QDRANT_URL" | quote }}
+            - name: QDRANT_COLLECTION
+              value: {{ index .Values "rag-orchestrator" "env" "QDRANT_COLLECTION" | quote }}
+            - name: VECTOR_SIZE
+              value: {{ .Values.qdrant.initJob.vectorSize | quote }}
+            - name: DISTANCE
+              value: {{ .Values.qdrant.initJob.distance | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir requests && \
+              python - << 'EOF'
+              import os, sys, requests
+
+              url = os.environ["QDRANT_URL"].rstrip("/")
+              col = os.environ["QDRANT_COLLECTION"]
+              size = int(os.environ.get("VECTOR_SIZE", "384"))
+              dist = os.environ.get("DISTANCE", "Cosine")
+
+              r = requests.get(f"{url}/collections/{col}", timeout=10)
+              if r.status_code == 200:
+                  print(f"[OK] Collection exists: {col}")
+                  sys.exit(0)
+
+              payload = {
+                  "vectors": {
+                      "size": size,
+                      "distance": dist
+                  }
+              }
+
+              r = requests.put(f"{url}/collections/{col}", json=payload, timeout=20)
+              print(r.status_code, r.text)
+              r.raise_for_status()
+              print(f"[OK] Created collection: {col}")
+              EOF
+{{- end }}

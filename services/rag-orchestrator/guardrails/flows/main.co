@@ -1,0 +1,12 @@
+# guardrails/flows/main.co
+# Colang 1.0 – core medical RAG dialogue flow
+
+define user ask medical question
+  "I have a question about my health."
+
+define bot give safe medical answer
+  "I'm not a doctor, but I can share some general medical information based on the available context. For personal medical advice, please consult a healthcare professional."
+
+define flow
+  user ask medical question
+  bot give safe medical answer

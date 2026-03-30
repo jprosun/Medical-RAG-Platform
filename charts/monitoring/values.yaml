@@ -1,0 +1,28 @@
+namespace: monitoring
+
+prometheus:
+  image: prom/prometheus:v2.54.1
+  scrapeInterval: 15s
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+grafana:
+  image: grafana/grafana:11.1.4
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+ingress:
+  enabled: true

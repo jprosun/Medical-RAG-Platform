@@ -1,0 +1,46 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: {{ .Values.namespace }}
+data:
+  logstash.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+    }
+
+    filter {
+      # Try to parse JSON messages (from rag-orchestrator)
+      json {
+        source => "message"
+        target => "fields"
+        # Don't blow up on non-JSON logs (nginx, redis, etc.)
+        skip_on_invalid_json => true
+      }
+
+      # If JSON parsed successfully, promote common fields
+      if [fields][service] {
+        mutate {
+          add_field => {
+            "service"      => "%{[fields][service]}"
+            "path"         => "%{[fields][path]}"
+            "method"       => "%{[fields][method]}"
+            "status"       => "%{[fields][status]}"
+            "duration_ms"  => "%{[fields][duration_ms]}"
+            "request_id"   => "%{[fields][request_id]}"
+            "session_id"   => "%{[fields][session_id]}"
+          }
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch.logging.svc.cluster.local:9200"]
+        index => "filebeat-%{+YYYY.MM.dd}"
+      }
+    }
+{{- end }}

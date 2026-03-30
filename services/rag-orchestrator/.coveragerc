@@ -1,0 +1,16 @@
+[run]
+source = app
+
+omit =
+    app/main.py
+    app/health.py
+    app/llm_client.py
+    app/__init__.py
+    app/metrics.py
+    app/metrics_llm.py
+    app/guardrails_app.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.

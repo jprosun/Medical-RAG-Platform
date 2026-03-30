@@ -1,0 +1,153 @@
+"""
+Extract text from all digital PDFs identified by classify_pdfs.py.
+
+For each PDF, outputs a .txt file preserving the source structure:
+  rag-data/data_processed/{source_id}/{filename}.txt
+
+Each .txt file includes metadata header + clean text per page.
+"""
+import os
+import csv
+import json
+import time
+import re
+import fitz  # pymupdf
+
+CATALOG = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data\corpus_catalog.csv"
+REPORT = r"d:\CODE\DATN\LLM-MedQA-Assistant\tools\pdf_classification_report.json"
+BASE_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data"
+OUT_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data\data_processed"
+
+# Load classification report to get set of scanned files (to skip)
+with open(REPORT, "r", encoding="utf-8") as f:
+    report = json.load(f)
+scanned_paths = set(item["path"] for item in report.get("scanned_files", []))
+corrupted_paths = set(item["path"] for item in report.get("corrupted_files", []))
+non_pdf_paths = set(item["path"] for item in report.get("non_pdf_files", []))
+skip_paths = scanned_paths | corrupted_paths | non_pdf_paths
+
+
+def clean_text(text):
+    """Basic text cleaning for PDF-extracted content."""
+    # Remove excessive whitespace but keep paragraph breaks
+    text = re.sub(r'[ \t]+', ' ', text)
+    # Remove lines that are just numbers (page numbers)
+    text = re.sub(r'^\s*\d{1,3}\s*$', '', text, flags=re.MULTILINE)
+    # Collapse 3+ newlines into 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def extract_pdf(filepath):
+    """Extract all text from a PDF. Returns (text, page_count)."""
+    try:
+        doc = fitz.open(filepath)
+        pages = []
+        for i, page in enumerate(doc):
+            text = page.get_text()
+            if text.strip():
+                pages.append(text)
+        doc.close()
+        full_text = "\n\n".join(pages)
+        return clean_text(full_text), len(pages)
+    except Exception as e:
+        return f"[ERROR extracting: {e}]", 0
+
+
+def main():
+    with open(CATALOG, "r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    total = 0
+    extracted = 0
+    skipped = 0
+    errors = 0
+    total_chars = 0
+    total_pages = 0
+    start = time.time()
+
+    stats_by_source = {}
+
+    for row in rows:
+        rel_path = row.get("relative_path", "")
+        source = row.get("source_id", "unknown")
+        ext = row.get("extension", "").lower()
+
+        if source not in stats_by_source:
+            stats_by_source[source] = {"extracted": 0, "skipped": 0, "chars": 0, "pages": 0}
+
+        total += 1
+
+        # Skip non-digital PDFs
+        if rel_path in skip_paths or ext != ".pdf":
+            skipped += 1
+            stats_by_source[source]["skipped"] += 1
+            continue
+
+        filepath = os.path.join(BASE_DIR, rel_path)
+        if not os.path.exists(filepath):
+            skipped += 1
+            stats_by_source[source]["skipped"] += 1
+            continue
+
+        # Extract text
+        text, pages = extract_pdf(filepath)
+
+        if not text or text.startswith("[ERROR"):
+            errors += 1
+            continue
+
+        # Create output path
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        out_source_dir = os.path.join(OUT_DIR, source)
+        os.makedirs(out_source_dir, exist_ok=True)
+        out_path = os.path.join(out_source_dir, f"{basename}.txt")
+
+        # Build metadata header
+        header = f"""---
+source_id: {source}
+institution: {row.get('institution_or_journal', '')}
+title: {row.get('title', basename)}
+source_url: {row.get('item_url', '')}
+file_url: {row.get('file_url', '')}
+pages: {pages}
+chars: {len(text)}
+---
+
+"""
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(header + text)
+
+        extracted += 1
+        total_chars += len(text)
+        total_pages += pages
+        stats_by_source[source]["extracted"] += 1
+        stats_by_source[source]["chars"] += len(text)
+        stats_by_source[source]["pages"] += pages
+
+        if extracted % 500 == 0:
+            elapsed = time.time() - start
+            print(f"  Extracted {extracted} files ({elapsed:.1f}s) ...")
+
+    elapsed = time.time() - start
+
+    print(f"\n{'='*60}")
+    print(f"EXTRACTION COMPLETE in {elapsed:.1f}s")
+    print(f"{'='*60}")
+    print(f"  Files extracted: {extracted}")
+    print(f"  Files skipped:   {skipped} (scanned/non-pdf/missing)")
+    print(f"  Errors:          {errors}")
+    print(f"  Total pages:     {total_pages}")
+    print(f"  Total text:      {total_chars:,} chars ({total_chars/1024/1024:.1f} MB)")
+    print()
+    print("BY SOURCE:")
+    for src, s in sorted(stats_by_source.items()):
+        mb = s["chars"] / 1024 / 1024
+        print(f"  {src:30s} | extracted={s['extracted']:>4} skipped={s['skipped']:>3} | pages={s['pages']:>5} | {mb:.1f} MB text")
+    print(f"\nOutput directory: {OUT_DIR}")
+
+
+if __name__ == "__main__":
+    main()

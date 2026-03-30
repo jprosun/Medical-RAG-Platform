@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-orchestrator
+  labels:
+    app: rag-orchestrator
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: rag-orchestrator
+  template:
+    metadata:
+      labels:
+        app: rag-orchestrator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: rag-orchestrator-sa
+
+      containers:
+        - name: rag-orchestrator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - containerPort: {{ .Values.service.port }}
+
+          env:
+            # -----------------------------
+            # Enable guardrails
+            # -----------------------------
+            - name: GUARDRAILS_ENABLED
+              value: "true"
+            - name: OPENAI_API_KEY
+              value: dummy # openAPI key here is to passby authorization, we infact don't need the actual api key.
+            # -----------------------------
+            # External LLM (Vast.ai / vLLM)
+            # -----------------------------
+            - name: KSERVE_ENABLED
+              value: "{{ .Values.llm.enabled }}"
+
+            - name: KSERVE_BASE_URL
+              value: "{{ .Values.llm.baseUrl }}"
+
+            - name: KSERVE_COMPLETIONS_PATH
+              value: "{{ .Values.llm.completionsPath }}"
+
+            - name: LLM_MODEL_ID
+              value: "{{ .Values.llm.modelId }}"
+
+            - name: LLM_TIMEOUT_S
+              value: "{{ .Values.llm.timeoutSeconds }}"
+
+            - name: LLM_RETRIES
+              value: "{{ .Values.llm.retries }}"
+
+            - name: LLM_RETRY_BACKOFF_S
+              value: "{{ .Values.llm.retryBackoffSeconds }}"
+
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llm.apiKeySecret.name }}
+                  key: {{ .Values.llm.apiKeySecret.key }}
+
+            # -----------------------------
+            # Redis (session memory)
+            # -----------------------------
+            - name: REDIS_ENABLED
+              value: "{{ .Values.redis.enabled }}"
+
+            - name: REDIS_HOST
+              value: "{{ .Values.redis.host }}"
+
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+
+            - name: REDIS_TTL_SECONDS
+              value: "{{ .Values.redis.ttlSeconds }}"
+
+            # -----------------------------
+            # Qdrant (vector store)
+            # -----------------------------
+            - name: QDRANT_ENABLED
+              value: "{{ .Values.qdrant.enabled }}"
+
+            - name: QDRANT_URL
+              value: "{{ .Values.qdrant.url }}"
+
+            - name: QDRANT_COLLECTION
+              value: "{{ .Values.qdrant.collection }}"
+
+            # -----------------------------
+            # RAG parameters
+            # -----------------------------
+            - name: RAG_TOP_K
+              value: "{{ .Values.rag.topK }}"
+
+            - name: RAG_MIN_SCORE
+              value: "{{ .Values.rag.minScore }}"
+
+            - name: RAG_MAX_CONTEXT_TOKENS
+              value: "{{ .Values.rag.maxContextTokens }}"
+
+            - name: RAG_DEDUPLICATE
+              value: "{{ .Values.rag.deduplicate }}"
+            # -----------------------------
+            # Trace parameters
+            # -----------------------------
+            - name: OTEL_SERVICE_NAME
+              value: rag-orchestrator
+            - name: OTEL_EXPORTER_OTLP_HTTP_ENDPOINT
+              value: http://otel-collector.tracing.svc.cluster.local:4318/v1/traces
+              
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 40
+
+          resources:
+{{ toYaml .Values.resources | nindent 12 }}

@@ -1,0 +1,6 @@
+streamlit==1.37.0
+requests==2.32.3
+opentelemetry-api==1.39.1
+opentelemetry-sdk==1.39.1
+opentelemetry-exporter-otlp==1.39.1
+opentelemetry-instrumentation-requests==0.60b1

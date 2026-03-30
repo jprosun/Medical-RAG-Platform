@@ -1,0 +1,48 @@
+enabled: true
+
+namespace: logging
+
+elasticsearch:
+  image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+  javaHeap: "1g"
+  storage: 20Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 6Gi
+
+logstash:
+  image: docker.elastic.co/logstash/logstash:8.15.0
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+kibana:
+  image: docker.elastic.co/kibana/kibana:8.15.0
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+filebeat:
+  image: docker.elastic.co/beats/filebeat:8.15.0
+  resources:
+    requests:
+      cpu: 500m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+ingress:
+  enabled: true

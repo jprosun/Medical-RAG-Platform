@@ -1,0 +1,40 @@
+global:
+  namespace: model-serving
+
+ingress:
+  enabled: false
+
+streamlit:
+  image:
+    repository: us-central1-docker.pkg.dev/medqa-student-project/llm-medqa/streamlit-ui
+    tag: stable
+
+rag-orchestrator:
+  replicaCount: 1
+  image:
+    repository: us-central1-docker.pkg.dev/medqa-student-project/llm-medqa/rag-orchestrator
+    tag: stable
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+redis:
+  enabled: false
+
+qdrant:
+  enabled: false
+
+ingestion:
+  enabled: false
+  image:
+    repository: ""
+    tag: "latest"
+  dataMount:
+    enabled: false
+    type: "configMap"
+    configMapName: "medical-docs"
+  gcs:
+    enabled: false
+    uri: ""

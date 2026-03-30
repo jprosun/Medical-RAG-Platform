@@ -1,0 +1,36 @@
+enabled: false
+image:
+  repository: qdrant/qdrant
+  tag: "v1.11.0"
+  pullPolicy: IfNotPresent
+
+# Autopilot-friendly defaults
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "500m"
+    memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+persistence:
+  enabled: false
+  size: 4Gi
+
+# nodeSelector:
+#   node-type: cpu
+
+tolerations: []

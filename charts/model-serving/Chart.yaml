@@ -1,0 +1,22 @@
+apiVersion: v2
+name: model-serving
+description: Umbrella chart for isolated model-serving namespace (Streamlit + RAG + Redis + Qdrant + KServe)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: streamlit
+    version: 0.1.0
+    repository: file://../streamlit
+  - name: rag-orchestrator
+    version: 0.1.0
+    repository: file://../rag-orchestrator
+  - name: redis
+    version: 0.1.0
+    repository: file://../redis
+    condition: redis.enabled
+  - name: qdrant
+    version: 0.1.0
+    repository: file://../qdrant
+    condition: qdrant.enabled

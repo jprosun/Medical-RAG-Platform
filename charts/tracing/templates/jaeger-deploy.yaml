@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: {{ .Values.jaeger.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            # enable OTLP and gRPC collector endpoints
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+
+            # -----------------------------
+            # ingress params
+            # -----------------------------
+            - name: QUERY_BASE_PATH
+              value: "/jaeger"
+              
+          ports:
+            - name: query
+              containerPort: 16686
+            - name: collector-grpc
+              containerPort: 4317
+            - name: collector-http
+              containerPort: 4318
+          resources:
+            {{- toYaml .Values.jaeger.resources | nindent 12 }}

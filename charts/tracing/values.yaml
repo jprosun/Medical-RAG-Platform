@@ -1,0 +1,30 @@
+namespace: tracing
+
+otelCollector:
+  image: otel/opentelemetry-collector-contrib:0.104.0
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+jaeger:
+  image: jaegertracing/all-in-one:1.57
+  service:
+    type: ClusterIP
+    queryPort: 16686
+    collectorGrpcPort: 4317
+    collectorHttpPort: 4318
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+ingress:
+  enabled: true

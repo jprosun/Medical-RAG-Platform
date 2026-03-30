@@ -1,0 +1,16 @@
+colang_version: "1.0"
+
+models:
+  - type: main
+    engine: external
+    model: mistralai/Mistral-7B-Instruct-v0.2
+    parameters:
+      temperature: 0.2
+      max_tokens: 512
+
+rails:
+  input:
+    flows: []
+
+  output:
+    flows: []

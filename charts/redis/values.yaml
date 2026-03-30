@@ -1,0 +1,42 @@
+enabled: false
+image:
+  # NOTE (GKE Autopilot): official `redis:*` images commonly run as root and may be rejected.
+  # Bitnami images run as non-root by default and work well on Autopilot.
+  repository: bitnami/redis
+  tag: "7.2"
+  pullPolicy: IfNotPresent
+
+# Disable password for dev; enable and wire secrets for production.
+auth:
+  enabled: false
+
+# Autopilot requires explicit resources; keep them modest for dev.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 256m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+persistence:
+  enabled: false
+  size: 1Gi
+
+# nodeSelector:
+#   node-type: cpu
+
+tolerations: []

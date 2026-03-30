@@ -1,0 +1,58 @@
+# Default values for rag-orchestrator.
+# This file MUST NOT contain secrets.
+
+replicaCount: 1
+
+image:
+  repository: rag-orchestrator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+
+# -----------------------------
+# Redis (session memory)
+# -----------------------------
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+  ttlSeconds: 86400
+
+# -----------------------------
+# Qdrant (vector store)
+# -----------------------------
+qdrant:
+  enabled: true
+  url: http://qdrant:6333
+  collection: medical_docs
+
+rag:
+  topK: 4
+  minScore: 0.25
+  maxContextTokens: 2048
+  deduplicate: true
+
+# -----------------------------
+# External LLM (vLLM / Vast.ai)
+# -----------------------------
+llm:
+  enabled: true
+
+  timeoutSeconds: 300
+  retries: 3
+  retryBackoffSeconds: 3
+
+  apiKeySecret:
+    name: llm-secrets
+    key: apiKey

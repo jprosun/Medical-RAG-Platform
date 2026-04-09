@@ -93,11 +93,15 @@ def find_boundaries(lines: List[str]) -> List[Dict]:
             score = 3 if is_tom_tat else 1  # TÓM TẮT gets premium score
             
             # Look backwards from the anchor
+            title_lines_collected = []  # (real_idx, text) pairs
             for j in reversed(range(len(context_lines))):
                 ctx_line = context_lines[j].strip()
                 real_idx = look_back_start + j
                 
                 if not ctx_line or _RE_JOURNAL_HEADER.search(ctx_line):
+                    # Blank or noise: if we already have title lines, stop collecting
+                    if title_lines_collected:
+                        break
                     continue
                     
                 # Abort if we hit an English abstract block from previous article or section heading
@@ -110,12 +114,21 @@ def find_boundaries(lines: List[str]) -> List[Dict]:
                     score += 2
                     continue
                     
-                # Identify Title block (always above Author, but we take the nearest upward)
+                # Identify Title lines — collect ALL consecutive ALL-CAPS lines
                 if looks_like_title(ctx_line):
-                    found_title_text = ctx_line
-                    found_title_idx = real_idx
-                    score += 2
+                    title_lines_collected.append((real_idx, ctx_line))
+                    continue
+                
+                # Non-title, non-author, non-blank line → stop if we have titles
+                if title_lines_collected:
                     break
+            
+            # Build full title from collected lines (they are in reverse order)
+            if title_lines_collected:
+                title_lines_collected.reverse()  # chronological order
+                found_title_idx = title_lines_collected[0][0]  # topmost line
+                found_title_text = " ".join(t[1] for t in title_lines_collected)
+                score += 2
             
             # Validate boundary
             # Accept if we have a strong signal (Score >= 5 means Anchor + Author or Anchor + Title)

@@ -34,6 +34,7 @@ DATA_FILE = os.getenv("DATA_FILE", "combined.jsonl")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
 OVERLAP = int(os.getenv("OVERLAP", "150"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "64"))
+REMOTE_EMBED_URL = os.getenv("REMOTE_EMBED_URL", "")
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
     print(f"  Qdrant URL   : {QDRANT_URL}")
     print(f"  Collection   : {COLLECTION}")
     print(f"  Embedding    : {EMBEDDING_MODEL}")
+    print(f"  Remote GPU   : {REMOTE_EMBED_URL or 'OFF (local CPU)'}")
     print(f"  Data file    : {DATA_FILE}")
     print(f"  Chunk size   : {CHUNK_SIZE} / overlap {OVERLAP}")
     print("=" * 60)
@@ -101,7 +103,7 @@ def main():
 
     # Connect to Qdrant
     print(f"\n[2/4] Connecting to Qdrant at {QDRANT_URL}...")
-    qclient = QdrantClient(url=QDRANT_URL)
+    qclient = QdrantClient(url=QDRANT_URL, check_compatibility=False)
 
     # Build embedder and detect vector size
     print(f"\n[3/4] Loading embedding model: {EMBEDDING_MODEL}...")
@@ -109,13 +111,14 @@ def main():
     vec_size = len(next(embedder.embed(["vector size probe"])).tolist())
     print(f"  → Vector dimension: {vec_size}")
 
-    # Ensure collection exists (recreate if needed for clean staging)
+    # Ensure collection exists (resume-friendly: don't delete existing data)
     existing = {c.name for c in qclient.get_collections().collections}
     if COLLECTION in existing:
-        print(f"  → Deleting existing collection '{COLLECTION}' for clean staging...")
-        qclient.delete_collection(COLLECTION)
-    ensure_collection(qclient, COLLECTION, vec_size)
-    print(f"  → Collection '{COLLECTION}' ready")
+        info = qclient.get_collection(COLLECTION)
+        print(f"  → Collection '{COLLECTION}' exists with {info.points_count} points (resuming)")
+    else:
+        ensure_collection(qclient, COLLECTION, vec_size)
+        print(f"  → Collection '{COLLECTION}' created")
 
     # Upsert
     print(f"\n[4/4] Upserting {len(chunks)} chunks (batch size={BATCH_SIZE})...")
@@ -126,6 +129,7 @@ def main():
         embedder=embedder,
         chunks=chunks,
         batch_size=BATCH_SIZE,
+        remote_embed_url=REMOTE_EMBED_URL or None,
     )
     upsert_time = time.time() - t0
     print(f"  → Upserted in {upsert_time:.1f}s")

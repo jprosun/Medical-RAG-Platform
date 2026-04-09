@@ -2,8 +2,12 @@ import os
 from functools import lru_cache
 from typing import Any
 
-from nemoguardrails import RailsConfig, LLMRails
-from nemoguardrails.llm.providers import register_llm_provider
+try:
+    from nemoguardrails import RailsConfig, LLMRails
+    from nemoguardrails.llm.providers import register_llm_provider
+    _HAS_GUARDRAILS = True
+except ImportError:
+    _HAS_GUARDRAILS = False
 
 from typing import Any, List, Optional
 from langchain_core.language_models import BaseLanguageModel
@@ -137,14 +141,17 @@ class ExternalInferenceLLM(BaseLanguageModel):
         return "\n\n".join(parts)
 
 
-register_llm_provider("external", ExternalInferenceLLM)
+if _HAS_GUARDRAILS:
+    register_llm_provider("external", ExternalInferenceLLM)
 
 
-GUARDRAILS_ENABLED = os.getenv("GUARDRAILS_ENABLED", "false").lower() == "true"
+GUARDRAILS_ENABLED = _HAS_GUARDRAILS and os.getenv("GUARDRAILS_ENABLED", "false").lower() == "true"
 
 
 @lru_cache()
-def get_rails_app() -> LLMRails:
+def get_rails_app():
+    if not _HAS_GUARDRAILS:
+        raise RuntimeError("nemoguardrails not installed")
     config = RailsConfig.from_path("guardrails")
     return LLMRails(config)
 

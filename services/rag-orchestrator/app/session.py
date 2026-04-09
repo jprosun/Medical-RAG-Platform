@@ -92,3 +92,13 @@ class SessionStore:
             )
         else:
             self._memory_store[session_id] = history
+
+    def delete_session(self, session_id: str):
+        """Delete a session's history and title."""
+        if self.redis_enabled:
+            self._client.delete(session_id)
+            self._client.delete(f"title:{session_id}")
+        else:
+            self._memory_store.pop(session_id, None)
+            self._memory_titles.pop(session_id, None)
+

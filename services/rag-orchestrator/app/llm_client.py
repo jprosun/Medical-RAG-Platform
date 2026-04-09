@@ -88,6 +88,17 @@ class KServeClient:
                 if r.status_code in (503, 504):
                     raise RuntimeError(f"Upstream transient error {r.status_code}")
 
+                # Phase 4: Handle 429 rate limit with longer backoff
+                if r.status_code == 429:
+                    retry_after = r.headers.get("Retry-After", "")
+                    wait_s = float(retry_after) if retry_after.replace(".", "").isdigit() else 10.0
+                    wait_s = max(wait_s, 10.0)  # minimum 10s for rate limit
+                    print(f"[LLM] 429 rate limit hit, waiting {wait_s}s (attempt {attempt + 1}/{self.retries + 1})")
+                    if attempt < self.retries:
+                        time.sleep(wait_s)
+                        continue
+                    raise RuntimeError(f"Rate limit exceeded after {self.retries + 1} attempts")
+
                 r.raise_for_status()
                 data = r.json()
 
@@ -123,7 +134,9 @@ class KServeClient:
                 ).inc()
                 last_err = e
                 if attempt < self.retries:
-                    time.sleep(self.retry_backoff_s)
+                    # Use longer backoff for subsequent retries
+                    backoff = self.retry_backoff_s * (attempt + 1)
+                    time.sleep(backoff)
                     continue
                 raise last_err
 

@@ -25,8 +25,8 @@ services:
       dockerfile: services/rag-orchestrator/Dockerfile
     environment:
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: staging_medqa
-      EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
+      QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
+      EMBEDDING_MODEL: BAAI/bge-m3
       RAG_TOP_K: "7"
       RAG_MIN_SCORE: "0.45"
       RAG_MAX_CONTEXT_TOKENS: "2000"
@@ -35,7 +35,7 @@ services:
       KSERVE_BASE_URL: https://api.groq.com/openai
       KSERVE_COMPLETIONS_PATH: /v1/chat/completions
       LLM_MODEL_ID: llama-3.3-70b-versatile
-      LLM_API_KEY: [ENCRYPTION_KEY]
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MAX_TOKENS: "2048"
       LLM_TEMPERATURE: "0.3"
       LLM_TOP_P: "0.9"
@@ -68,8 +68,8 @@ services:
       context: .
       dockerfile: services/qdrant-ingestor/Dockerfile
     environment:
-      QDRANT_COLLECTION: staging_medqa
-      EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
+      QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
+      EMBEDDING_MODEL: BAAI/bge-m3
       OTEL_SDK_DISABLED: "true"
     command:
       - --qdrant-url

@@ -15,9 +15,16 @@ from .session import SessionStore
 from .health import readiness, liveness
 from utils.logging import log_request
 from .retriever import build_retriever_from_env
-from .prompt import build_prompt
+from .prompt import build_prompt, build_prompt_v2
 from .llm_client import build_kserve_client_from_env
 from .schemas import ChatRequest, ChatResponse
+from .query_router import route_query
+from .article_aggregator import aggregate_articles
+from .evidence_extractor import extract_evidence
+from .chunk_quality_filter import filter_chunks
+from .evidence_normalizer import normalize_evidence
+from .conflict_detector import detect_conflicts
+from .coverage_scorer import score_coverage
 from .metrics import (
     RAG_CHAT_REQUESTS_TOTAL,
     RAG_CHAT_ERRORS_TOTAL,
@@ -81,6 +88,25 @@ tracer = trace.get_tracer("rag-orchestrator")
 # ---------------------------------------------------------------------
 
 session_store = SessionStore()
+
+
+# ---------------------------------------------------------------------
+# Pre-load embedding model at startup (avoid cold-start timeout)
+# ---------------------------------------------------------------------
+@app.on_event("startup")
+def preload_retriever():
+    import time as _time
+    t0 = _time.time()
+    print("[startup] Pre-loading embedding model...")
+    retriever = build_retriever_from_env()
+    if retriever:
+        # Warm up with a dummy query to force model download
+        try:
+            retriever._embed_query("warmup")
+        except Exception:
+            pass
+    elapsed = round(_time.time() - t0, 1)
+    print(f"[startup] Embedding model ready in {elapsed}s")
 
 
 # ---------------------------------------------------------------------
@@ -173,6 +199,11 @@ def update_session_title(session_id: str, payload: TitleUpdate):
     return {"status": "ok", "title": payload.title}
 
 
+@app.delete("/api/session/{session_id}")
+def delete_session(session_id: str):
+    session_store.delete_session(session_id)
+    return {"ok": True, "deleted": session_id}
+
 # ---------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------
@@ -212,7 +243,18 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("query.rewritten", search_query)
                 span.set_attribute("query.was_rewritten", search_query != req.message)
 
-            # retrieve context
+            # ── 1. Query Router (rule-based, no LLM) ──────────────
+            with tracer.start_as_current_span("query.route") as span:
+                router_output = route_query(search_query)
+                span.set_attribute("router.query_type", router_output.query_type)
+                span.set_attribute("router.depth", router_output.depth)
+                span.set_attribute("router.needs_extractor", router_output.needs_extractor)
+                span.set_attribute("router.retrieval_profile", router_output.retrieval_profile)
+
+            # ── 2. Retrieve with profile-based top_k ─────────────
+            _PROFILE_TOP_K = {"light": 8, "standard": 12, "deep": 20}
+            profile_top_k = _PROFILE_TOP_K.get(router_output.retrieval_profile, 12)
+
             with tracer.start_as_current_span("retriever.build"):
                 retriever = build_retriever_from_env()
 
@@ -222,38 +264,102 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     "vector.collection",
                     os.getenv("QDRANT_COLLECTION", "medical_docs"),
                 )
-                span.set_attribute(
-                    "vector.top_k",
-                    int(os.getenv("RAG_TOP_K", "4")),
-                )
+                span.set_attribute("vector.top_k", profile_top_k)
 
+                retrieval_mode = getattr(router_output, "retrieval_mode", "article_centric")
                 t0 = time.time()
-                chunks = retriever.retrieve(search_query) if retriever else []
-                retrieval_ms = round((time.time() - t0) * 1000.0, 2)
 
+                if retrieval_mode == "mechanistic_synthesis" and retriever:
+                    # Phase 4: Decomposed multi-axis retrieval
+                    # Use heuristic decomposition (no LLM) to save API calls
+                    from .mechanistic_query_decomposer import decompose_query
+                    subqueries = decompose_query(
+                        search_query, llm_client=None, max_subqueries=3
+                    )
+                    span.set_attribute("retrieval.mode", "multi_axis")
+                    span.set_attribute("retrieval.subqueries", len(subqueries))
+
+                    top_k_per_sub = max(3, profile_top_k // len(subqueries) + 1)
+                    chunks = retriever.retrieve_multi_axis(
+                        subqueries, top_k_per_query=top_k_per_sub
+                    )
+                else:
+                    # Standard single-query retrieval
+                    span.set_attribute("retrieval.mode", "single")
+                    chunks = retriever.retrieve(
+                        search_query, 
+                        top_k_override=profile_top_k,
+                        retrieval_mode=retrieval_mode,
+                    ) if retriever else []
+
+                retrieval_ms = round((time.time() - t0) * 1000.0, 2)
                 span.set_attribute("retrieval.chunks", len(chunks))
 
             RAG_RETRIEVAL_LATENCY_SECONDS.observe(retrieval_ms / 1000.0)
             request.state.retrieval_ms = retrieval_ms
             request.state.chunks_returned = len(chunks)
 
-            # estimate context tokens (simple heuristic; consistent with retriever)
             est_tokens = sum(max(1, len(c.text) // 4) for c in chunks)
             RAG_CONTEXT_TOKENS.observe(est_tokens)
 
             if not chunks:
                 RAG_EMPTY_CONTEXT_TOTAL.inc()
 
-            # build grounded prompt + trace
+            # ── 2.5. Chunk Quality Filter (Phase 4) ──────────────
+            with tracer.start_as_current_span("chunk.quality_filter") as span:
+                pre_filter_count = len(chunks)
+                chunks = filter_chunks(chunks)
+                span.set_attribute("filter.before", pre_filter_count)
+                span.set_attribute("filter.after", len(chunks))
+                span.set_attribute("filter.removed", pre_filter_count - len(chunks))
+
+            # ── 3. Article Aggregation ───────────────────────────
+            with tracer.start_as_current_span("article.aggregate") as span:
+                aggregated = aggregate_articles(chunks, search_query, router_output)
+                span.set_attribute("article.primary", aggregated.primary.title[:80])
+                span.set_attribute("article.secondary_count", len(aggregated.secondary))
+                span.set_attribute("article.total_count", len(aggregated.all_articles))
+
+            # ── 4. Evidence Extraction (conditional) ─────────────
+            with tracer.start_as_current_span("evidence.extract") as span:
+                kserve_for_extract = build_kserve_client_from_env() if router_output.needs_extractor else None
+                evidence_pack = extract_evidence(
+                    aggregated, search_query, router_output, llm_client=kserve_for_extract
+                )
+                span.set_attribute("evidence.extractor_used", evidence_pack.extractor_used)
+                span.set_attribute("evidence.numbers_found", len(evidence_pack.primary_source.numbers))
+
+            # ── 4.5. Evidence Normalization & Conflict Detection (Phase 2) 
+            with tracer.start_as_current_span("evidence.normalize") as span:
+                evidence_pack = normalize_evidence(evidence_pack)
+                span.set_attribute("evidence.normalized", True)
+
+            with tracer.start_as_current_span("evidence.conflict_detect") as span:
+                evidence_pack = detect_conflicts(evidence_pack)
+                span.set_attribute("evidence.conflicts_found", len(evidence_pack.conflict_notes))
+
+            # ── 5. Coverage Scoring ──────────────────────────────
+            with tracer.start_as_current_span("coverage.score") as span:
+                coverage = score_coverage(evidence_pack, router_output, search_query)
+                span.set_attribute("coverage.level", coverage.coverage_level)
+                span.set_attribute("coverage.allow_external", coverage.allow_external)
+                if evidence_pack.conflict_notes:
+                    # Penalize confidence ceiling if conflicts found
+                    coverage.confidence_ceiling = "moderate"
+
+            # ── 6. Answer Composition ────────────────────────────
             with tracer.start_as_current_span("prompt.build") as span:
                 span.set_attribute("prompt.history_turns", len(history))
                 span.set_attribute("prompt.context_chunks", len(chunks))
-                messages_payload = build_prompt(
-                    search_query, # Pass the rewritten query instead of original message to prevent context confusion
-                    chunks,
+                span.set_attribute("prompt.version", "v2")
+                messages_payload = build_prompt_v2(
+                    search_query,
+                    evidence_pack,
+                    router_output,
+                    coverage,
                     chat_history=history,
                 )
-                
+
             with tracer.start_as_current_span("llm.inference") as span:
                 span.set_attribute(
                     "llm.model",
@@ -261,7 +367,6 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 )
                 g0 = time.time()
 
-                # Check prompt before send
                 if GUARDRAILS_ENABLED:
                     with tracer.start_as_current_span("guardrails.evaluate") as span:
                         span.set_attribute("llm.provider", "nemo_guardrails")
@@ -274,7 +379,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     kserve = build_kserve_client_from_env()
 
                     if kserve:
-                        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "512"))
+                        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
                         temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
                         answer = kserve.generate(
                             messages_payload,
@@ -282,7 +387,6 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             temperature=temperature,
                         )
                     else:
-                        # existing fallback path
                         RAG_FALLBACK_TOTAL.inc()
                         if chunks:
                             answer = (
@@ -300,7 +404,6 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             )
                 llm_ms = round((time.time() - g0) * 1000.0, 2)
 
-            # generate answer
             kserve = build_kserve_client_from_env()
 
             RAG_GENERATION_LATENCY_SECONDS.observe(llm_ms / 1000.0)

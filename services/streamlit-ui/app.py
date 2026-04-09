@@ -22,7 +22,7 @@ RAG_API_URL = os.getenv(
     "http://rag-orchestrator.model-serving.svc.cluster.local:8000"
 )
 
-REQUEST_TIMEOUT_S = int(os.getenv("RAG_API_TIMEOUT_S", "120"))
+REQUEST_TIMEOUT_S = int(os.getenv("RAG_API_TIMEOUT_S", "180"))
 
 # -----------------------
 # Structured stdout logger (for Filebeat)
@@ -66,6 +66,20 @@ with st.sidebar:
         st.session_state.editing_session = None
         st.rerun()
 
+    if st.session_state.messages:
+        if st.button("🗑️ Xóa cuộc trò chuyện này", use_container_width=True, type="secondary"):
+            try:
+                requests.delete(
+                    f"{RAG_API_URL}/api/session/{st.session_state.session_id}",
+                    timeout=5,
+                )
+            except Exception:
+                pass
+            st.session_state.session_id = str(uuid.uuid4())
+            st.session_state.messages = []
+            st.session_state.editing_session = None
+            st.rerun()
+
     st.divider()
     st.subheader("Lịch sử trò chuyện")
     
@@ -89,7 +103,7 @@ with st.sidebar:
                     st.rerun()
         else:
             # Render normal button
-            col1, col2 = st.columns([8, 2])
+            col1, col2, col3 = st.columns([7, 1.5, 1.5])
             with col1:
                 # Highlight active session
                 btn_type = "primary" if sid == st.session_state.session_id else "secondary"
@@ -108,6 +122,16 @@ with st.sidebar:
             with col2:
                 if st.button("✏️", key=f"edit_btn_{sid}", use_container_width=True):
                     st.session_state.editing_session = sid
+                    st.rerun()
+            with col3:
+                if st.button("🗑️", key=f"del_btn_{sid}", use_container_width=True):
+                    try:
+                        requests.delete(f"{RAG_API_URL}/api/session/{sid}", timeout=5)
+                    except Exception:
+                        pass
+                    if st.session_state.session_id == sid:
+                        st.session_state.session_id = str(uuid.uuid4())
+                        st.session_state.messages = []
                     st.rerun()
 
 # -----------------------

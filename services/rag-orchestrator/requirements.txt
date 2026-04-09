@@ -11,6 +11,7 @@ httpx==0.27.2
 # Vector DB
 qdrant-client==1.10.1
 fastembed==0.7.4
+sentence-transformers>=2.6.0
 
 # Metrics / testing
 prometheus-client==0.20.0

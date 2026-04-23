@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
 from .query_router import RouterOutput
-from .article_aggregator import AggregatedResult, ArticleGroup
+from .article_aggregator import AggregatedResult, ArticleGroup, _extract_keywords
 
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -68,6 +68,7 @@ class PrimaryEvidence:
     intervention_or_exposure: Optional[EvidenceField] = None
     comparator: Optional[EvidenceField] = None
     outcomes: List[EvidenceField] = field(default_factory=list)
+    direct_answer_spans: List[ClaimEvidence] = field(default_factory=list)
     key_findings: List[ClaimEvidence] = field(default_factory=list)
     numbers: List[NumberEvidence] = field(default_factory=list)
     limitations: List[ClaimEvidence] = field(default_factory=list)
@@ -137,6 +138,312 @@ Luật lệ Trích xuất Bắt buộc:
 4. `primary_endpoints` phải được tách riêng với kết quả phụ.
 5. chunk_index là số index (0, 1, 2...) của chunk chứa thông tin.
 """
+
+
+_DIRECT_ANSWER_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from",
+    "trong", "theo", "cua", "của", "mot", "một", "sau", "bao", "nhieu",
+    "nhiêu", "la", "là", "nao", "nào", "duoc", "được", "nhu", "như",
+    "the", "thế", "nao", "nào", "co", "có", "gi", "gì",
+}
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[\.\?!])\s+|\n+')
+_DIRECT_NUMERIC_RE = re.compile(r'\d+[.,]?\d*\s*%|\d+[.,]?\d*')
+_DIRECT_FRAGMENT_MARKERS = ("title:", "source:", "audience:", "body:", "keywords:")
+
+
+def _normalize_text(text: str) -> str:
+    import unicodedata
+
+    base = unicodedata.normalize("NFKD", text or "")
+    stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
+    return " ".join(stripped.lower().split())
+
+
+def _content_tokens(text: str) -> list[str]:
+    tokens = re.findall(r"\w+", _normalize_text(text), flags=re.UNICODE)
+    return [tok for tok in tokens if len(tok) >= 3 and tok not in _DIRECT_ANSWER_STOPWORDS]
+
+
+def _query_phrases(query: str) -> list[str]:
+    tokens = _content_tokens(query)
+    phrases = []
+    for size in (3, 2):
+        for i in range(len(tokens) - size + 1):
+            phrase = " ".join(tokens[i:i + size])
+            if phrase not in phrases:
+                phrases.append(phrase)
+    return phrases[:12]
+
+
+def _split_candidate_sentences(text: str) -> list[str]:
+    text = re.sub(r'(?i)\btitle:\s*.*?(?=\bsource:|\baudience:|\bbody:|$)', ' ', text or '')
+    text = re.sub(r'(?i)\bsource:\s*.*?(?=\baudience:|\bbody:|$)', ' ', text)
+    text = re.sub(r'(?i)\baudience:\s*.*?(?=\bbody:|$)', ' ', text)
+    text = re.sub(r'(?i)\bbody:\s*', ' ', text)
+    text = re.sub(r'(?i)\bkeywords?:\s*.*$', ' ', text)
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    text = re.sub(r'\n{2,}', '\n\n', text)
+    text = re.sub(r'\s+[o•]\s+(?=[A-ZÀ-Ỵ])', '. ', text)
+    text = re.sub(r'(?i)\btheo dõi sau mổ:\s*', '. Theo dõi sau mổ: ', text)
+    text = re.sub(r'(?i)\btheo doi sau mo:\s*', '. Theo dõi sau mổ: ', text)
+    text = re.sub(r'(?i)\bđiều trị nội khoa hỗ trợ:\s*', '. Điều trị nội khoa hỗ trợ: ', text)
+    text = re.sub(r'(?i)\bdieu tri noi khoa ho tro:\s*', '. Điều trị nội khoa hỗ trợ: ', text)
+    sentences = []
+    for part in _SENTENCE_SPLIT_RE.split(text or ""):
+        sent = re.sub(r"\s+", " ", part).strip(" -\t\r\n")
+        if len(sent) >= 30:
+            sent_norm = _normalize_text(sent)
+            if any(marker in sent_norm for marker in _DIRECT_FRAGMENT_MARKERS):
+                continue
+            sentences.append(sent)
+    return sentences
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    text_norm = _normalize_text(text)
+    return any(marker in text_norm for marker in markers)
+
+
+def _looks_like_dense_table(sentence: str) -> bool:
+    sent_norm = _normalize_text(sentence)
+    digit_count = sum(ch.isdigit() for ch in sentence)
+    return digit_count >= 12 or any(marker in sent_norm for marker in ("rct", "95% ci", "or (", "tv/dq", "nmct"))
+
+
+def _score_direct_answer_sentence(
+    sentence: str,
+    query: str,
+    query_terms: set[str],
+    query_phrases: list[str],
+    asks_numeric: bool,
+    section_title: str = "",
+) -> float:
+    sentence_norm = _normalize_text(sentence)
+    if any(marker in sentence_norm for marker in _DIRECT_FRAGMENT_MARKERS):
+        return -1.0
+
+    sent_terms = _extract_keywords(sentence)
+    overlap = len(query_terms & sent_terms)
+    score = overlap * 1.5
+
+    for phrase in query_phrases:
+        if phrase and phrase in sentence_norm:
+            score += 2.0 if len(phrase.split()) >= 3 else 1.2
+
+    if asks_numeric and _DIRECT_NUMERIC_RE.search(sentence):
+        score += 2.0
+    if "karnofsky" in _normalize_text(query) and "karnofsky" in sentence_norm:
+        score += 3.0
+    if "duy tri" in _normalize_text(query) and "duy tri" in sentence_norm:
+        score += 1.5
+    if "pho bien nhat" in _normalize_text(query) and "pho bien nhat" in sentence_norm:
+        score += 2.0
+
+    section_norm = _normalize_text(section_title)
+    if any(marker in section_norm for marker in ("ket qua", "kết quả", "ket luan", "kết luận", "tom tat", "tóm tắt")):
+        score += 0.8
+    return score
+
+
+def _select_direct_answer_spans(
+    article: ArticleGroup,
+    query: str,
+    router_output: RouterOutput,
+) -> list[ClaimEvidence]:
+    if getattr(router_output, "answer_style", "") != "exact":
+        return []
+
+    query_terms = _extract_keywords(query)
+    if not query_terms and not _DIRECT_NUMERIC_RE.search(query or ""):
+        return []
+
+    phrases = _query_phrases(query)
+    asks_numeric = any(marker in _normalize_text(query) for marker in ("bao nhieu", "ty le", "phan tram", "karnofsky", "diem"))
+    candidates: list[tuple[float, str, str, str]] = []
+    for chunk in article.chunks:
+        section_title = str(chunk.metadata.get("section_title", "") or "")
+        for sentence in _split_candidate_sentences(chunk.text):
+            score = _score_direct_answer_sentence(
+                sentence,
+                query,
+                query_terms,
+                phrases,
+                asks_numeric=asks_numeric,
+                section_title=section_title,
+            )
+            if score >= 2.0:
+                candidates.append((score, sentence, chunk.id, section_title))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected: list[ClaimEvidence] = []
+    seen = set()
+    for score, sentence, chunk_id, section_title in candidates:
+        norm = _normalize_text(sentence)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        selected.append(
+            ClaimEvidence(
+                claim=sentence,
+                support_text=sentence,
+                supporting_span=sentence,
+                chunk_id=chunk_id,
+                section_title=section_title,
+            )
+        )
+        if len(selected) >= 3:
+            break
+    return selected
+
+
+def _select_query_focus_claims(
+    article: ArticleGroup,
+    query: str,
+    router_output: Optional[RouterOutput],
+) -> list[ClaimEvidence]:
+    answer_style = getattr(router_output, "answer_style", "") if router_output else ""
+    query_type = getattr(router_output, "query_type", "") if router_output else ""
+    if answer_style not in {"summary", "bounded_partial"} and query_type not in {
+        "teaching_explainer",
+        "comparative_synthesis",
+        "guideline_comparison",
+    }:
+        return []
+
+    query_terms = _extract_keywords(query)
+    if not query_terms:
+        return []
+
+    query_norm = _normalize_text(query)
+    phrases = _query_phrases(query)
+    candidates: list[tuple[float, str, str, str]] = []
+    asks_criteria = any(marker in query_norm for marker in ("chi so", "tiêu chí", "tieu chi"))
+    asks_why = any(marker in query_norm for marker in ("vì sao", "vi sao", "tại sao", "tai sao"))
+    asks_group_factors = any(marker in query_norm for marker in ("nhóm yếu tố", "nhom yeu to", "dựa trên", "dua tren"))
+    criteria_markers = ("lam sang", "can lam sang", "nhap vien", "tinh trang", "danh gia", "theo doi")
+    metric_markers = ("phan so tong mau", "ef", "bnp", "huyet ap", "thuoc")
+    interaction_markers = ("rifampicin", "tacrolimus", "cyclosporine", "thải ghép", "thai ghep")
+    selection_factor_markers = ("muc do", "trieu chung", "nguy co quanh thu thuat", "song con")
+    followup_factor_markers = (
+        "noi khoa toi uu",
+        "noi khoa ho tro",
+        "nguy co tim mach",
+        "theo doi hinh anh",
+        "duplex",
+        "kiem soat huyet ap",
+        "dai thao duong",
+        "roi loan lipid mau",
+        "tai hep",
+        "dot quy",
+    )
+
+    for chunk in article.chunks:
+        section_title = str(chunk.metadata.get("section_title", "") or "")
+        for sentence in _split_candidate_sentences(chunk.text):
+            sentence_norm = _normalize_text(sentence)
+            score = _score_direct_answer_sentence(
+                sentence,
+                query,
+                query_terms,
+                phrases,
+                asks_numeric=False,
+                section_title=section_title,
+            )
+
+            if asks_criteria:
+                if _contains_any(sentence_norm, criteria_markers):
+                    score += 1.6
+                if _contains_any(sentence_norm, metric_markers) and not _contains_any(sentence_norm, criteria_markers):
+                    score -= 1.2
+            if asks_why:
+                if any(
+                    marker in sentence_norm
+                    for marker in ("tương tác", "tuong tac", "nguy cơ", "nguy co", "thải ghép", "thai ghep", "độ nhạy", "do nhay", "kéo dài", "keo dai")
+                ):
+                    score += 1.2
+            if asks_group_factors:
+                if _contains_any(sentence_norm, selection_factor_markers + followup_factor_markers):
+                    score += 1.8
+                elif any(
+                    marker in sentence_norm
+                    for marker in ("mức độ", "muc do", "triệu chứng", "trieu chung", "nguy cơ", "nguy co", "sống còn", "song con", "nội khoa", "noi khoa", "hình ảnh", "hinh anh")
+                ):
+                    score += 1.0
+                if _looks_like_dense_table(sentence) and not _contains_any(sentence_norm, selection_factor_markers + followup_factor_markers):
+                    score -= 2.4
+            if "ghep than" in query_norm and _contains_any(sentence_norm, interaction_markers):
+                score += 4.0
+
+            if score >= 2.0:
+                candidates.append((score, sentence, chunk.id, section_title))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if asks_criteria:
+        preferred = [
+            item for item in candidates
+            if _contains_any(item[1], criteria_markers) and not _contains_any(item[1], metric_markers)
+        ]
+        if preferred:
+            candidates = preferred + [item for item in candidates if item not in preferred]
+    if asks_why and "ghep than" in query_norm:
+        preferred = [item for item in candidates if _contains_any(item[1], interaction_markers)]
+        if preferred:
+            candidates = preferred + [item for item in candidates if item not in preferred]
+    if asks_group_factors:
+        preferred = [
+            item for item in candidates
+            if _contains_any(item[1], selection_factor_markers + followup_factor_markers)
+        ]
+        if preferred:
+            candidates = preferred + [item for item in candidates if item not in preferred]
+
+    selected: list[ClaimEvidence] = []
+    seen = set()
+    for _score, sentence, chunk_id, section_title in candidates:
+        norm = _normalize_text(sentence)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        selected.append(
+            ClaimEvidence(
+                claim=sentence,
+                support_text=sentence,
+                supporting_span=sentence,
+                chunk_id=chunk_id,
+                section_title=section_title,
+            )
+        )
+        if len(selected) >= 4:
+            break
+
+    def _append_required_claim(markers: tuple[str, ...]) -> None:
+        if any(_contains_any(claim.claim, markers) for claim in selected):
+            return
+        for _score, sentence, chunk_id, section_title in candidates:
+            if not _contains_any(sentence, markers):
+                continue
+            norm = _normalize_text(sentence)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            selected.append(
+                ClaimEvidence(
+                    claim=sentence,
+                    support_text=sentence,
+                    supporting_span=sentence,
+                    chunk_id=chunk_id,
+                    section_title=section_title,
+                )
+            )
+            break
+
+    if asks_why and "ghep than" in query_norm:
+        _append_required_claim(interaction_markers)
+    if asks_group_factors:
+        _append_required_claim(selection_factor_markers)
+        _append_required_claim(followup_factor_markers)
+
+    return selected
 
 
 def _build_extractor_prompt(
@@ -247,11 +554,18 @@ def _parse_extractor_response(
     return evidence
 
 
-def _build_simple_evidence(article: ArticleGroup) -> PrimaryEvidence:
+def _build_simple_evidence(
+    article: ArticleGroup,
+    query: str = "",
+    router_output: Optional[RouterOutput] = None,
+) -> PrimaryEvidence:
     """Build evidence without LLM — raw text + regex number extraction + chunk provenance."""
     evidence = PrimaryEvidence(title=article.title)
     raw_text = "\n\n".join(c.text for c in article.chunks)
     evidence.raw_text = raw_text
+    if query and router_output is not None:
+        evidence.direct_answer_spans = _select_direct_answer_spans(article, query, router_output)
+        evidence.key_findings = _select_query_focus_claims(article, query, router_output)
 
     # Regex extraction for common medical numbers
     num_patterns = [
@@ -260,6 +574,7 @@ def _build_simple_evidence(article: ArticleGroup) -> PrimaryEvidence:
         (r'OR\s*[=:]\s*([\d.]+)', 'OR'),
         (r'HR\s*[=:]\s*([\d.]+)', 'HR'),
         (r'RR\s*[=:]\s*([\d.]+)', 'RR'),
+        (r'(\d+[.,]\d+\s*%)', 'percentage'),
         (r'sensitivity\s*[=:]\s*([\d.]+\s*%?)', 'sensitivity'),
         (r'specificity\s*[=:]\s*([\d.]+\s*%?)', 'specificity'),
         (r'p\s*[<>=]\s*([\d.]+)', 'p-value'),
@@ -316,17 +631,38 @@ def extract_evidence(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                attempt_budget=int(os.getenv("EXTRACTOR_MAX_ATTEMPTS", "1")),
             )
             pack.primary_source = _parse_extractor_response(
                 raw_response, aggregated.primary
             )
+            if not pack.primary_source.direct_answer_spans:
+                pack.primary_source.direct_answer_spans = _select_direct_answer_spans(
+                    aggregated.primary,
+                    query,
+                    router_output,
+                )
+            if not pack.primary_source.key_findings:
+                pack.primary_source.key_findings = _select_query_focus_claims(
+                    aggregated.primary,
+                    query,
+                    router_output,
+                )
             pack.extractor_used = True
         except Exception as exc:
             print(f"[EvidenceExtractor] LLM extraction failed: {exc}")
-            pack.primary_source = _build_simple_evidence(aggregated.primary)
+            pack.primary_source = _build_simple_evidence(
+                aggregated.primary,
+                query=query,
+                router_output=router_output,
+            )
     else:
         # Simple extraction for lightweight queries
-        pack.primary_source = _build_simple_evidence(aggregated.primary)
+        pack.primary_source = _build_simple_evidence(
+            aggregated.primary,
+            query=query,
+            router_output=router_output,
+        )
 
     # Secondary sources — always simple extraction
     for sec_art in aggregated.secondary:

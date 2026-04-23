@@ -38,6 +38,11 @@ def _make_article(chunks):
     )
 
 
+@dataclass
+class MockRouterOutput:
+    answer_style: str = "exact"
+
+
 # ── ClaimEvidence v1.5 fields ────────────────────────────────────────
 
 def test_claim_evidence_has_v15_fields():
@@ -162,3 +167,85 @@ def test_simple_evidence_no_numbers():
     evidence = _build_simple_evidence(article)
     assert len(evidence.numbers) == 0
     assert evidence.sample_size is None
+
+
+def test_simple_evidence_extracts_direct_answer_spans_for_exact_numeric_query():
+    chunks = [
+        _make_chunk(
+            "c0",
+            (
+                "Kết quả cho thấy 88,1% người bệnh cải thiện triệu chứng đau và 92,2% cải thiện "
+                "một số hoạt động sinh hoạt."
+            ),
+            "Kết quả",
+        ),
+        _make_chunk(
+            "c1",
+            (
+                "Tỷ lệ hồi phục chức năng vận động đạt 96,18%. "
+                "Chỉ số Karnofsky được duy trì trên 80 điểm trong 3-6 tháng."
+            ),
+            "Kết quả",
+        ),
+    ]
+    article = _make_article(chunks)
+
+    evidence = _build_simple_evidence(
+        article,
+        query="Tỷ lệ hồi phục chức năng vận động là bao nhiêu và Karnofsky được duy trì trên 80 điểm trong bao lâu?",
+        router_output=MockRouterOutput(),
+    )
+
+    spans = [span.supporting_span for span in evidence.direct_answer_spans]
+    assert any("96,18%" in span for span in spans), spans
+    assert any("Karnofsky" in span and "3-6 tháng" in span for span in spans), spans
+
+
+def test_simple_evidence_extracts_query_focused_claims_for_summary_question():
+    chunks = [
+        _make_chunk(
+            "c0",
+            (
+                "Biểu hiện lâm sàng ở bệnh nhân ghép thận mắc lao thường không điển hình, "
+                "nhiều trường hợp là lao ngoài phổi hoặc lao lan tỏa. "
+                "Rifampicin làm giảm nồng độ tacrolimus và cyclosporine, làm tăng nguy cơ thải ghép nên cần theo dõi và chỉnh liều chặt chẽ. "
+                "Thuốc kháng lao cũng có thể gây độc tính gan."
+            ),
+            "Tóm tắt",
+        ),
+    ]
+    article = _make_article(chunks)
+
+    evidence = _build_simple_evidence(
+        article,
+        query="Ở bệnh nhân ghép thận nghi mắc lao, vì sao việc chẩn đoán và điều trị phải được cân nhắc cùng nhau thay vì tách rời?",
+        router_output=MockRouterOutput(answer_style="summary"),
+    )
+
+    claims = [claim.claim for claim in evidence.key_findings]
+    assert any("Rifampicin" in claim and "thải ghép" in claim for claim in claims), claims
+
+
+def test_simple_evidence_strips_metadata_wrappers_before_summary_focus_selection():
+    chunks = [
+        _make_chunk(
+            "c0",
+            (
+                "Title: BỆNH VIỆN ĐA KHOA HUYỆN HOÀI ĐỨC Source: Tạp chí Y học Việt Nam "
+                "Audience: clinician Body: Nghiên cứu đánh giá tình trạng nhập viện của người bệnh "
+                "trên lâm sàng và cận lâm sàng cùng kết quả điều trị."
+            ),
+            "SUMMARY",
+        ),
+    ]
+    article = _make_article(chunks)
+
+    evidence = _build_simple_evidence(
+        article,
+        query="Theo nghiên cứu này, kết quả điều trị ở bệnh nhân suy tim mạn tính được đánh giá qua những chỉ số hoặc tiêu chí nào?",
+        router_output=MockRouterOutput(answer_style="summary"),
+    )
+
+    claims = [claim.claim for claim in evidence.key_findings]
+    assert any("lâm sàng và cận lâm sàng" in claim for claim in claims), claims
+    assert all("Title:" not in claim for claim in claims), claims

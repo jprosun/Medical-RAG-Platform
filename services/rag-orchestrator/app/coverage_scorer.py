@@ -53,6 +53,11 @@ _VN_STOPS_BIGRAM = {
     "hay không", "tại sao", "thế nào", "bao gồm",
 }
 
+_GENERIC_SCOPE_CONCEPTS = {
+    "can thiệp", "yếu tố", "quyết định", "theo dõi", "điều trị",
+    "chẩn đoán", "kết quả", "thời gian", "kiểm soát", "chất lượng",
+}
+
 
 def _extract_bigram_concepts(text: str) -> list:
     """
@@ -107,6 +112,10 @@ def _extract_bigram_concepts(text: str) -> list:
     
     return unique
 
+
+def _filter_generic_scope_concepts(concepts: list) -> list:
+    return [concept for concept in concepts if concept not in _GENERIC_SCOPE_CONCEPTS]
+
 @dataclass
 class CoverageOutput:
     """Coverage assessment result."""
@@ -130,6 +139,17 @@ class CoverageOutput:
             self.unsupported_concepts = []
 
 
+def _asks_for_numeric_value(query: str) -> bool:
+    q = (query or "").lower()
+    return any(
+        marker in q
+        for marker in (
+            "bao nhiêu", "bao nhieu", "tỷ lệ", "ty le", "phần trăm", "phan tram",
+            "karnofsky", "auc", " hr ", " or ", " rr ", " ci ", " điểm ", " diem ",
+        )
+    )
+
+
 def score_coverage(
     evidence_pack: EvidencePack,
     router_output: RouterOutput,
@@ -142,12 +162,13 @@ def score_coverage(
     ev = evidence_pack.primary_source
     scores = CoverageScores()
     abstain_parts = []
+    answer_style = getattr(router_output, "answer_style", "")
 
     # ── 1. Direct answerability ──────────────────────────────────────
     # How many key_findings were extracted?
+    query_kw = _extract_keywords(query) if query else set()
     if ev.key_findings:
         findings_text = " ".join(f.claim for f in ev.key_findings)
-        query_kw = _extract_keywords(query) if query else set()
         if query_kw:
             findings_kw = _extract_keywords(findings_text)
             overlap = len(query_kw & findings_kw)
@@ -155,25 +176,37 @@ def score_coverage(
         else:
             scores.direct_answerability = 0.7  # has findings but can't compare
     elif ev.raw_text:
-        # No structured findings but has raw text
-        scores.direct_answerability = 0.4
+        # Lightweight flows often rely on raw text only; score overlap instead
+        # of hard-capping them at medium forever.
+        if query_kw:
+            raw_kw = _extract_keywords(ev.raw_text[:4000])
+            overlap = len(query_kw & raw_kw)
+            overlap_score = min(overlap / max(len(query_kw), 1), 1.0)
+            scores.direct_answerability = max(0.45, overlap_score)
+        else:
+            scores.direct_answerability = 0.6
     else:
         scores.direct_answerability = 0.0
 
     # ── 2. Numeric coverage ──────────────────────────────────────────
     if router_output.requires_numbers:
-        if ev.numbers and len(ev.numbers) >= 2:
+        if answer_style == "exact" and not _asks_for_numeric_value(query):
             scores.numeric_coverage = 1.0
-        elif ev.numbers:
-            scores.numeric_coverage = 0.5
+        elif answer_style == "bounded_partial" and not _asks_for_numeric_value(query):
+            scores.numeric_coverage = 1.0
         else:
-            # Check raw text for numbers
-            num_pattern = re.compile(r'\d+[.,]?\d*\s*%|p\s*[<>=]|OR|HR|AUC|n\s*=', re.IGNORECASE)
-            if ev.raw_text and num_pattern.search(ev.raw_text):
-                scores.numeric_coverage = 0.3
+            if ev.numbers and len(ev.numbers) >= 2:
+                scores.numeric_coverage = 1.0
+            elif ev.numbers:
+                scores.numeric_coverage = 0.5
             else:
-                scores.numeric_coverage = 0.0
-                abstain_parts.append("numeric_data")
+                # Check raw text for numbers
+                num_pattern = re.compile(r'\d+[.,]?\d*\s*%|p\s*[<>=]|OR|HR|AUC|n\s*=', re.IGNORECASE)
+                if ev.raw_text and num_pattern.search(ev.raw_text):
+                    scores.numeric_coverage = 0.3
+                else:
+                    scores.numeric_coverage = 0.0
+                    abstain_parts.append("numeric_data")
     else:
         scores.numeric_coverage = 1.0  # not required
 
@@ -202,20 +235,33 @@ def score_coverage(
         scores.limitations_coverage = 1.0  # not required
 
     # ── 5. Conflict risk ─────────────────────────────────────────────
-    # If secondary sources have very different findings
+    # Secondary sources alone should not force a disclaimer; reserve heavier
+    # penalties for explicit conflict detection later in the pipeline.
     if evidence_pack.secondary_sources:
-        scores.conflict_risk = 0.2  # some risk with multiple sources
+        scores.conflict_risk = 0.05
     else:
         scores.conflict_risk = 0.0
 
     # ── Compute overall level ──────────────────────────────────────
     # Weighted average of applicable scores
-    key_scores = [
-        scores.direct_answerability,
-        scores.numeric_coverage,
-        scores.methods_coverage if evidence_pack.extractor_used else 0.5,
-        scores.limitations_coverage,
-    ]
+    if answer_style == "exact":
+        key_scores = [
+            scores.direct_answerability,
+            scores.numeric_coverage,
+        ]
+    elif answer_style in {"summary", "bounded_partial"}:
+        key_scores = [
+            scores.direct_answerability,
+            scores.numeric_coverage,
+            1.0,
+        ]
+    else:
+        key_scores = [
+            scores.direct_answerability,
+            scores.numeric_coverage,
+            scores.methods_coverage if evidence_pack.extractor_used else 0.5,
+            scores.limitations_coverage,
+        ]
     avg_score = sum(key_scores) / len(key_scores)
 
     if avg_score >= 0.7 and scores.direct_answerability >= 0.5:
@@ -248,16 +294,27 @@ def score_coverage(
 
     elif query_type == "study_result_extraction":
         # Needs design + population + numbers
-        if not ev.design:
-            missing_reqs.append("study_design")
-        if not ev.population:
-            missing_reqs.append("study_population")
-        if not ev.numbers or len(ev.numbers) < 1:
-            missing_reqs.append("numeric_findings")
-        if len(missing_reqs) >= 2:
-            confidence_ceiling = "moderate"
-        if len(missing_reqs) >= 3:
-            confidence_ceiling = "low"
+        if answer_style == "exact":
+            if _asks_for_numeric_value(query):
+                if not ev.numbers and not re.search(r'\d+[.,]?\d*\s*%', ev.raw_text or ""):
+                    missing_reqs.append("numeric_findings")
+            if scores.direct_answerability < 0.35:
+                missing_reqs.append("direct_answer_span")
+            if len(missing_reqs) >= 1:
+                confidence_ceiling = "moderate"
+            if len(missing_reqs) >= 2:
+                confidence_ceiling = "low"
+        else:
+            if not ev.design:
+                missing_reqs.append("study_design")
+            if not ev.population:
+                missing_reqs.append("study_population")
+            if not ev.numbers or len(ev.numbers) < 1:
+                missing_reqs.append("numeric_findings")
+            if len(missing_reqs) >= 2:
+                confidence_ceiling = "moderate"
+            if len(missing_reqs) >= 3:
+                confidence_ceiling = "low"
 
     elif query_type == "research_appraisal":
         # Needs methods + limitations
@@ -278,7 +335,8 @@ def score_coverage(
 
     elif query_type == "comparative_synthesis":
         # Needs multiple sources
-        if not evidence_pack.secondary_sources:
+        retrieval_mode = getattr(router_output, "retrieval_mode", "")
+        if retrieval_mode != "article_centric" and not evidence_pack.secondary_sources:
             missing_reqs.append("comparison_sources")
             confidence_ceiling = "moderate"
 
@@ -331,6 +389,9 @@ def score_coverage(
             else:
                 unsupported_concepts.append(concept)
         
+        supported = _filter_generic_scope_concepts(supported)
+        unsupported_concepts = _filter_generic_scope_concepts(unsupported_concepts)
+
         # Cap unsupported at max 7 to avoid prompt bloat
         unsupported_concepts = unsupported_concepts[:7]
         
@@ -340,7 +401,14 @@ def score_coverage(
         
         # Flag gap if significant portion unsupported
         total = len(query_bigrams) if query_bigrams else 1
-        if unsupported_concepts and len(unsupported_concepts) / total > 0.4:
+        unsupported_ratio = len(unsupported_concepts) / total if total else 0.0
+        if answer_style == "bounded_partial":
+            gap_threshold = 0.35
+        else:
+            gap_threshold = 0.6
+        if unsupported_concepts and supported and unsupported_ratio <= gap_threshold:
+            concept_evidence_gap = False
+        elif unsupported_concepts and unsupported_ratio > gap_threshold:
             concept_evidence_gap = True
             if confidence_ceiling == "high":
                 confidence_ceiling = "moderate"

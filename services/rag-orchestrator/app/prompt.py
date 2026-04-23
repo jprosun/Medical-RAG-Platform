@@ -175,6 +175,45 @@ _TEMPLATE_GUIDELINE = """Trả lời theo cấu trúc:
 ## Nguồn tham khảo
 [1] Tên bài viết - Tạp chí"""
 
+_TEMPLATE_EXACT = """Trả lời theo cấu trúc:
+
+## Câu trả lời trực tiếp
+1-2 câu trả lời đúng ngay fact/span/số liệu mà câu hỏi yêu cầu. Nếu có số liệu, nêu số trước. Không kể mục tiêu/phương pháp nghiên cứu nếu câu hỏi không hỏi.
+
+## Căn cứ trong tài liệu
+- Chỉ nêu 1-3 chi tiết trực tiếp chứng minh câu trả lời từ tài liệu chính [1].
+- Không biến phần này thành báo cáo nghiên cứu đầy đủ.
+
+## Nguồn tham khảo
+[1] Tên bài viết - Tạp chí"""
+
+_TEMPLATE_SUMMARY = """Trả lời theo cấu trúc:
+
+## Kết luận ngắn
+1-2 câu tóm tắt trực tiếp ý chính của câu hỏi. Không mở đầu bằng background chung chung.
+
+## Ý chính theo dữ liệu
+- Liệt kê 2-5 ý chính thật sự được support bởi tài liệu [1].
+- Ưu tiên trả lời đúng các ý người dùng hỏi; không lan sang methods/background nếu không cần.
+
+## Nguồn tham khảo
+[1] Tên bài viết - Tạp chí"""
+
+_TEMPLATE_BOUNDED = """Trả lời theo cấu trúc:
+
+## Có thể khẳng định
+- Liệt kê ngắn các điểm được tài liệu hỗ trợ trực tiếp [1].
+
+## Chưa thể khẳng định
+- Liệt kê ngắn các điểm tài liệu chưa đủ để kết luận.
+- Không dùng ngôn ngữ tuyệt đối cho phần chưa đủ evidence.
+
+## Căn cứ trong tài liệu
+- Tóm tắt ngắn câu/ý chính trong tài liệu làm căn cứ cho phần trên [1].
+
+## Nguồn tham khảo
+[1] Tên bài viết - Tạp chí"""
+
 
 _TEMPLATES = {
     "fact_extraction": _TEMPLATE_FACT,
@@ -190,15 +229,30 @@ _TEMPLATES = {
 
 def _format_evidence_context(
     evidence_pack: EvidencePack,
+    include_secondary_sources: bool = True,
+    question: str = "",
 ) -> str:
     """Format evidence pack into context string for LLM."""
     parts = []
 
     # Primary source
     ev = evidence_pack.primary_source
+    query_norm = (question or "").lower()
+    criteria_only_scope = (
+        any(marker in query_norm for marker in ("chỉ số", "chi so", "tiêu chí", "tieu chi"))
+        and bool(getattr(ev, "key_findings", []))
+        and not bool(getattr(ev, "direct_answer_spans", []))
+    )
     primary_block = f"★ TÀI LIỆU CHÍNH [1]\nTitle: {ev.title}\n"
 
-    if evidence_pack.extractor_used and ev.key_findings:
+    if ev.direct_answer_spans:
+        primary_block += "TRÍCH ĐOẠN TRẢ LỜI TRỰC TIẾP:\n"
+        for span in ev.direct_answer_spans:
+            section = f" ({span.section_title})" if span.section_title else ""
+            primary_block += f"  - {span.supporting_span or span.claim}{section}\n"
+        primary_block += "\n"
+
+    if evidence_pack.extractor_used:
         # Structured evidence available
         if ev.design:
             primary_block += f"Thiết kế: {ev.design.text}\n"
@@ -215,10 +269,6 @@ def _format_evidence_context(
         if ev.outcomes:
             outcomes_str = "; ".join(o.text for o in ev.outcomes)
             primary_block += f"Kết cục: {outcomes_str}\n"
-        if ev.key_findings:
-            primary_block += "Phát hiện chính:\n"
-            for f in ev.key_findings:
-                primary_block += f"  - {f.claim}\n"
         if ev.numbers:
             primary_block += "Số liệu:\n"
             for n in ev.numbers:
@@ -237,12 +287,29 @@ def _format_evidence_context(
         # Raw text only
         primary_block += f"\n{ev.raw_text}"
 
+    if criteria_only_scope and ev.raw_text:
+        truncated_raw = (ev.raw_text or "")[:1200]
+        primary_block = primary_block.replace(ev.raw_text, truncated_raw, 1)
+        primary_block = primary_block.replace("Nội dung đầy đủ:", "Nội dung truy hồi liên quan:", 1)
+
+    if ev.key_findings:
+        findings_block = "Phát hiện chính gần nhất với câu hỏi:\n"
+        for finding in ev.key_findings:
+            section = f" ({finding.section_title})" if finding.section_title else ""
+            findings_block += f"  - {finding.claim}{section}\n"
+        if criteria_only_scope and ev.raw_text:
+            truncated_raw = (ev.raw_text or "")[:1200]
+            primary_block = primary_block.replace(f"\n{truncated_raw}", f"\n{findings_block}\n{truncated_raw}", 1)
+        else:
+            primary_block = primary_block.replace(f"\n{ev.raw_text}", f"\n{findings_block}\n{ev.raw_text}", 1)
+
     parts.append(primary_block)
 
     # Secondary sources
-    for i, sec in enumerate(evidence_pack.secondary_sources):
-        sec_block = f"\n📄 TÀI LIỆU PHỤ [{i+2}]\nTitle: {sec.title}\n{sec.raw_text}"
-        parts.append(sec_block)
+    if include_secondary_sources:
+        for i, sec in enumerate(evidence_pack.secondary_sources):
+            sec_block = f"\n📄 TÀI LIỆU PHỤ [{i+2}]\nTitle: {sec.title}\n{sec.raw_text}"
+            parts.append(sec_block)
 
     # Inject conflict notes if any
     notes = getattr(evidence_pack, 'conflict_notes', [])
@@ -291,7 +358,103 @@ def _get_coverage_instruction(coverage: CoverageOutput) -> str:
     return " ".join(parts)
 
 
+def _should_force_opening_disclaimer(coverage: CoverageOutput) -> bool:
+    """Only force a leading disclaimer when evidence is truly inadequate."""
+    unsupported = getattr(coverage, "unsupported_concepts", []) or []
+    allowed_scope = getattr(coverage, "allowed_answer_scope", "") or ""
+    if coverage.coverage_level == "low":
+        return True
+    if coverage.force_abstain_parts and coverage.coverage_level != "high":
+        return True
+    if unsupported and not allowed_scope:
+        return True
+    return False
+
+
+def _should_include_secondary_sources(router_output: RouterOutput) -> bool:
+    """Only expose secondary sources when the answer genuinely needs synthesis."""
+    retrieval_mode = getattr(router_output, "retrieval_mode", "")
+    if retrieval_mode == "article_centric":
+        return False
+    return router_output.query_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer"}
+
+
+def _select_template(router_output: RouterOutput) -> str:
+    answer_style = getattr(router_output, "answer_style", "")
+    if answer_style == "exact":
+        return _TEMPLATE_EXACT
+    if answer_style == "summary":
+        return _TEMPLATE_SUMMARY
+    if answer_style == "bounded_partial":
+        return _TEMPLATE_BOUNDED
+    return _TEMPLATES.get(router_output.query_type, _TEMPLATE_FACT)
+
+
+def _answer_style_instruction(router_output: RouterOutput) -> str:
+    answer_style = getattr(router_output, "answer_style", "")
+    if answer_style == "exact":
+        return (
+            "KIỂU TRẢ LỜI EXACT: Trả lời đúng fact/span người dùng hỏi ở câu đầu tiên. "
+            "Nếu EVIDENCE có mục 'TRÍCH ĐOẠN TRẢ LỜI TRỰC TIẾP', phải ưu tiên tuyệt đối các span này trước danh sách số liệu hoặc raw text. "
+            "Không chuyển sang kiểu 'mục tiêu-phương pháp-kết quả' nếu câu hỏi không yêu cầu.\n\n"
+        )
+    if answer_style == "summary":
+        return (
+            "KIỂU TRẢ LỜI SUMMARY: Ưu tiên đủ các ý chính người dùng hỏi. "
+            "Nếu EVIDENCE có mục 'Phát hiện chính gần nhất với câu hỏi', phải ưu tiên các câu này trước raw text. "
+            "Không biến câu trả lời thành báo cáo nghiên cứu chung chung. Nếu tài liệu chỉ nêu nhóm ý hoặc tiêu chí chung, giữ nguyên ở mức nhóm chung; không tự mở rộng thành chỉ số, thuốc hoặc ví dụ cụ thể mà nguồn không nêu.\n\n"
+        )
+    if answer_style == "bounded_partial":
+        return (
+            "KIỂU TRẢ LỜI BOUNDED_PARTIAL: Bắt buộc tách rõ phần 'Có thể khẳng định' và 'Chưa thể khẳng định'. "
+            "Chỉ nêu giới hạn đúng tại claim còn thiếu evidence.\n\n"
+        )
+    return ""
+
+
 # ── Main builder ─────────────────────────────────────────────────────
+
+def _query_scope_instruction(
+    question: str,
+    evidence_pack: EvidencePack,
+    router_output: RouterOutput,
+) -> str:
+    query_norm = (question or "").lower()
+    answer_style = getattr(router_output, "answer_style", "")
+    if answer_style not in {"summary", "bounded_partial", "exact"}:
+        return ""
+
+    ev = evidence_pack.primary_source
+    key_findings = getattr(ev, "key_findings", []) or []
+    has_direct_spans = bool(getattr(ev, "direct_answer_spans", []))
+    instructions: list[str] = []
+
+    if any(marker in query_norm for marker in ("chỉ số", "chi so", "tiêu chí", "tieu chi")) and key_findings and not has_direct_spans:
+        instructions.append(
+            "Với câu hỏi hỏi về chỉ số/tiêu chí đánh giá: nếu phần 'Phát hiện chính gần nhất với câu hỏi' "
+            "chỉ nêu nhóm đánh giá ở mức lâm sàng, cận lâm sàng, tình trạng nhập viện hoặc mục tiêu theo dõi, "
+            "phải giữ câu trả lời ở đúng mức đó và nói rõ evidence hiện có chưa nêu bộ chỉ số cụ thể. "
+            "Không được đào sang raw text để tự ráp thêm EF, huyết áp, thuốc hay thước đo cụ thể nếu chúng không nằm trong findings/direct spans."
+        )
+
+    if any(marker in query_norm for marker in ("vì sao", "vi sao", "tại sao", "tai sao")):
+        instructions.append(
+            "Với câu hỏi 'vì sao', phải giữ đủ các nhóm lý do độc lập có trong nguồn chính. "
+            "Nếu evidence có cả khó khăn chẩn đoán và nguy cơ/tương tác điều trị, phải nêu đủ cả hai; không được chỉ trả lời một vế."
+        )
+
+    if any(marker in query_norm for marker in ("dựa trên", "dua tren", "nhóm yếu tố", "nhom yeu to", "quyết định", "quyet dinh")):
+        instructions.append(
+            "Với câu hỏi hỏi 'dựa trên những nhóm yếu tố nào' hoặc 'quyết định ... và theo dõi ...', phải liệt kê đủ các nhóm tiêu chí mà nguồn chính nêu. "
+            "Nếu evidence có cả tiêu chí chọn can thiệp và yêu cầu theo dõi sau can thiệp, phải nêu cả hai; không thay bằng diễn giải sức khỏe chung chung."
+        )
+        instructions.append(
+            "Nếu nguồn chính có nêu điều trị nội khoa hỗ trợ, kiểm soát yếu tố nguy cơ hoặc theo dõi hình ảnh sau can thiệp, phải ưu tiên nêu các nhóm management đó; "
+            "không được thu hẹp phần follow-up chỉ còn lịch tái khám đơn thuần."
+        )
+
+    return "\n".join(instructions) + ("\n\n" if instructions else "")
+
 
 def build_prompt_v2(
     question: str,
@@ -316,10 +479,10 @@ def build_prompt_v2(
                 messages.append({"role": role, "content": content})
 
     # Build context from evidence
-    context_str = _format_evidence_context(evidence_pack)
+    context_str = _format_evidence_context(evidence_pack, question=question)
 
     # Get template for this query type
-    template = _TEMPLATES.get(router_output.query_type, _TEMPLATE_FACT)
+    template = _select_template(router_output)
 
     # Handle secondary section placeholder
     secondary_section = ""
@@ -337,8 +500,9 @@ def build_prompt_v2(
     missing = getattr(coverage, "missing_requirements", [])
     ceiling = getattr(coverage, "confidence_ceiling", "high")
     unsupported = getattr(coverage, "unsupported_concepts", []) or []
-    
-    if missing or coverage.coverage_level != "high" or ceiling != "high":
+    force_disclaimer = _should_force_opening_disclaimer(coverage)
+
+    if force_disclaimer:
         missing_str = ", ".join(missing) if missing else "một số khía cạnh"
         bounded_prefix = (
             f"BẮT BUỘC MỞ ĐẦU CÂU TRẢ LỜI BẰNG ĐÚNG CÂU SAU (với tư cách là Disclaimer):\n"
@@ -443,4 +607,112 @@ def build_prompt(
     user_content = f"CONTEXT:\n{context_str}\n\nQUESTION: {question}\n\n{lang_hint}"
     messages.append({"role": "user", "content": user_content})
 
+    return messages
+
+
+def build_prompt_v2(
+    question: str,
+    evidence_pack: EvidencePack,
+    router_output: RouterOutput,
+    coverage: CoverageOutput,
+    chat_history: list | None = None,
+) -> List[Dict[str, str]]:
+    """
+    Overridden v2 builder with tighter boundary control.
+
+    The original implementation above is kept for context, but this version is
+    the active one at import time and avoids forcing a generic insufficiency
+    disclaimer for every medium-confidence answer.
+    """
+    messages = [{"role": "system", "content": SYSTEM_RULES_V2}]
+
+    if chat_history:
+        for m in chat_history[-6:]:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if content.strip():
+                messages.append({"role": role, "content": content})
+
+    include_secondary_sources = _should_include_secondary_sources(router_output)
+    context_str = _format_evidence_context(
+        evidence_pack,
+        include_secondary_sources=include_secondary_sources,
+        question=question,
+    )
+    template = _select_template(router_output)
+
+    secondary_section = ""
+    if include_secondary_sources and evidence_pack.secondary_sources:
+        sec_parts = []
+        for i, _sec in enumerate(evidence_pack.secondary_sources):
+            sec_parts.append(f"### Tài liệu phụ [{i+2}]\n- Tóm tắt nội dung liên quan [{i+2}]")
+        secondary_section = "\n".join(sec_parts)
+    template = template.replace("{secondary_section}", secondary_section)
+
+    coverage_instr = _get_coverage_instruction(coverage)
+    missing = getattr(coverage, "missing_requirements", [])
+    unsupported = getattr(coverage, "unsupported_concepts", []) or []
+    allowed_scope = getattr(coverage, "allowed_answer_scope", "") or ""
+
+    prompt_prefix = ""
+    if _should_force_opening_disclaimer(coverage):
+        missing_str = ", ".join(missing) if missing else "một số khía cạnh"
+        prompt_prefix += (
+            "BẮT BUỘC mở đầu câu trả lời bằng đúng câu sau:\n"
+            f"> \"Trong phạm vi dữ liệu nội bộ hiện có, tôi mới tìm thấy bằng chứng liên quan một phần. "
+            f"Chưa có đủ dữ liệu nội bộ để kết luận đầy đủ về {missing_str}, nên phần trả lời dưới đây chỉ phản ánh những gì có thể kiểm chứng từ các tài liệu đã truy hồi.\"\n\n"
+        )
+    else:
+        prompt_prefix += (
+            "KHÔNG được mở đầu bằng disclaimer chung chung nếu ý chính đã có evidence trực tiếp. "
+            "Trả lời thẳng ở phần 'Kết luận ngắn', chỉ nêu giới hạn đúng tại claim còn thiếu evidence.\n\n"
+        )
+
+    if not include_secondary_sources:
+        prompt_prefix += (
+            "PHẠM VI NGUỒN: Với câu hỏi này, chỉ dùng TÀI LIỆU CHÍNH [1] để hình thành kết luận. "
+            "Không được đưa chi tiết từ tài liệu khác vào phần kết luận chính.\n\n"
+        )
+    else:
+        prompt_prefix += (
+            "NGUYÊN TẮC NGUỒN PHỤ: Chỉ dùng tài liệu phụ khi nó bổ sung một điểm liên quan trực tiếp mà "
+            "TÀI LIỆU CHÍNH [1] chưa bao phủ rõ. Nếu tài liệu phụ chỉ lặp lại hoặc yếu hơn [1], bỏ qua nó "
+            "trong kết luận chính.\n\n"
+        )
+
+    if unsupported and allowed_scope:
+        unsupported_str = ", ".join(unsupported[:5])
+        prompt_prefix += (
+            "HƯỚNG DẪN SCOPE:\n"
+            f"- Dữ liệu nội bộ CÓ HỖ TRỢ các khái niệm: {allowed_scope}\n"
+            "  -> Hãy phân tích sâu các phần này dựa trên evidence.\n"
+            f"- Dữ liệu nội bộ KHÔNG CÓ evidence trực tiếp về: {unsupported_str}\n"
+            "  -> Với những phần này, chỉ được ghi ngắn gọn rằng dữ liệu nội bộ chưa có bằng chứng.\n"
+            "  -> KHÔNG được tự bổ sung kiến thức nền để lấp khoảng trống.\n\n"
+        )
+    elif unsupported:
+        unsupported_str = ", ".join(unsupported[:5])
+        prompt_prefix += (
+            f"CÁC KHÁI NIỆM KHÔNG CÓ EVIDENCE: {unsupported_str}\n"
+            "BẮT BUỘC: Ghi rõ dữ liệu nội bộ chưa có bằng chứng về các khái niệm trên.\n"
+            "KHÔNG được tự bổ sung kiến thức nền.\n\n"
+        )
+
+    prompt_prefix += _answer_style_instruction(router_output)
+    prompt_prefix += _query_scope_instruction(question, evidence_pack, router_output)
+
+    user_content = (
+        f"EVIDENCE:\n{context_str}\n\n"
+        f"{'═' * 60}\n"
+        f"QUESTION: {question}\n\n"
+        f"QUERY TYPE: {router_output.query_type}\n"
+        f"COVERAGE: {coverage.coverage_level} — {coverage_instr}\n\n"
+        f"FORMAT YÊU CẦU:\n{template}\n\n"
+        f"{prompt_prefix}"
+        "Hãy đọc evidence kỹ lưỡng và trả lời trực tiếp phần nào đã được support rõ. "
+        "Nếu còn phần thiếu evidence, nêu ngắn gọn đúng phần thiếu thay vì viết một đoạn từ chối dài. "
+        "Dẫn nguồn [n] đầy đủ trong câu."
+    )
+
+    messages.append({"role": "user", "content": user_content})
     return messages

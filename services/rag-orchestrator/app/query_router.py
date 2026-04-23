@@ -15,6 +15,7 @@ Query types:
 
 from __future__ import annotations
 from dataclasses import dataclass
+import re
 import unicodedata
 
 
@@ -25,7 +26,7 @@ class RouterOutput:
     requires_numbers: bool
     requires_limitations: bool
     requires_comparison: bool
-    answer_style: str         # brief | structured_study | comparative | teaching
+    answer_style: str         # exact | summary | bounded_partial | structured_study | appraisal
     retrieval_profile: str    # light | standard | deep
     needs_extractor: bool     # whether to run Evidence Extractor
     retrieval_mode: str       # article_centric | topic_summary | mechanistic_synthesis
@@ -113,6 +114,16 @@ _FACT_KW = {
     "dấu hiệu", "dau hieu", "triệu chứng", "trieu chung",
 }
 
+_BOUNDED_PARTIAL_KW = {
+    "co the ket luan", "có thể kết luận",
+    "co the khang dinh", "có thể khẳng định",
+    "chua the khang dinh", "chưa thể khẳng định",
+    "khong the khang dinh", "không thể khẳng định",
+    "vuot troi tuyet doi", "vượt trội tuyệt đối",
+    "o moi khia canh", "ở mọi khía cạnh",
+    "dieu gi va chua the", "điều gì và chưa thể",
+}
+
 
 def _count_matches(text_lower: str, keyword_set: set) -> int:
     """Count how many keywords from the set appear in text.
@@ -124,6 +135,174 @@ def _count_matches(text_lower: str, keyword_set: set) -> int:
         if kw in text_lower or kw in text_stripped:
             count += 1
     return count
+
+
+def _has_explicit_comparison(text_lower: str) -> bool:
+    """Detect direct X-vs-Y style questions that need a comparative answer."""
+    text_stripped = _strip_diacritics(text_lower)
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    direct_markers = (
+        " hay ",
+        " hay ",
+        " hoặc ",
+        " hoac ",
+        " so với ",
+        " so voi ",
+        " vs ",
+        " versus ",
+        " vượt trội ",
+        " vuot troi ",
+        " tốt hơn ",
+        " tot hon ",
+        " hiệu quả hơn ",
+        " hieu qua hon ",
+        " khác nhau ",
+        " khac nhau ",
+        " giống nhau ",
+        " giong nhau ",
+    )
+    if any(marker in padded or marker in padded_stripped for marker in direct_markers):
+        return True
+    direct_patterns = (
+        r"\b[\w/+.-]{2,}\s+(hay|hoac|vs|versus)\s+[\w/+.-]{2,}\b",
+        r"\b[\w/+.-]{2,}\s+so voi\s+[\w/+.-]{2,}\b",
+        r"\b[\w/+.-]{2,}\s+vuot troi(?: tuyet doi)?\s+so voi\s+[\w/+.-]{2,}\b",
+        r"\bco the ket luan\s+[\w/+.-]{2,}.*\s+so voi\s+[\w/+.-]{2,}\b",
+    )
+    return any(re.search(pattern, text_stripped) for pattern in direct_patterns)
+
+
+def _has_direct_fact_question(text_lower: str) -> bool:
+    """Detect direct-value questions that should prefer concise fact answers."""
+    text_stripped = _strip_diacritics(text_lower)
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    direct_markers = (
+        " bao nhiêu ",
+        " bao nhieu ",
+        " là gì ",
+        " la gi ",
+        " tên gì ",
+        " ten gi ",
+        " loại nào ",
+        " loai nao ",
+        " như thế nào ",
+        " nhu the nao ",
+        " yếu tố nào ",
+        " yeu to nao ",
+        " những nhóm yếu tố nào ",
+        " nhom yeu to nao ",
+    )
+    if any(marker in padded or marker in padded_stripped for marker in direct_markers):
+        return True
+    regex_markers = (
+        r"bao\s+nhi",
+        r"l[aà]\s+g[iì]",
+        r"nh[uư]\s+th[ếe]\s+n[aà]o",
+        r"y[ếe]u\s+t[ốo]\s+n[aà]o",
+    )
+    return any(
+        re.search(pattern, text_lower) or re.search(pattern, text_stripped)
+        for pattern in regex_markers
+    )
+
+
+def _asks_for_numeric_value(text_lower: str) -> bool:
+    text_stripped = _strip_diacritics(text_lower)
+    numeric_markers = (
+        " bao nhieu ",
+        " bao nhiêu ",
+        " tỷ lệ ",
+        " ty le ",
+        " phần trăm ",
+        " phan tram ",
+        " hr ",
+        " or ",
+        " auc ",
+        " karnofsky ",
+        " điểm ",
+        " diem ",
+    )
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    if any(marker in padded or marker in padded_stripped for marker in numeric_markers):
+        return True
+    return bool(re.search(r"\b(hr|or|auc|rr|ci)\b", text_stripped))
+
+
+def _has_bounded_partial_question(text_lower: str) -> bool:
+    text_stripped = _strip_diacritics(text_lower)
+    return any(kw in text_lower or kw in text_stripped for kw in _BOUNDED_PARTIAL_KW)
+
+
+def _has_summary_request(text_lower: str) -> bool:
+    text_stripped = _strip_diacritics(text_lower)
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    markers = (
+        " những biện pháp ",
+        " nhung bien phap ",
+        " các biện pháp ",
+        " cac bien phap ",
+        " gồm những ",
+        " gom nhung ",
+        " bao gồm ",
+        " vai trò ",
+        " vai tro ",
+        " khác nhau như thế nào ",
+        " khac nhau nhu the nao ",
+        " những nhóm yếu tố nào ",
+        " nhung nhom yeu to nao ",
+        " yếu tố nào ",
+        " yeu to nao ",
+    )
+    return any(marker in padded or marker in padded_stripped for marker in markers)
+
+
+def _infer_answer_style(
+    query_lower: str,
+    best_type: str,
+    direct_fact_question: bool,
+    single_document_question: bool,
+) -> str:
+    if _has_bounded_partial_question(query_lower):
+        return "bounded_partial"
+    if best_type == "research_appraisal":
+        return "appraisal"
+    if best_type in {"fact_extraction", "study_result_extraction"}:
+        if _has_summary_request(query_lower) and not _asks_for_numeric_value(query_lower):
+            return "summary"
+        if direct_fact_question or _asks_for_numeric_value(query_lower):
+            return "exact"
+        return "summary" if single_document_question else "exact"
+    if best_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer"}:
+        return "summary"
+    return "summary"
+
+
+def _looks_single_document_question(text_lower: str) -> bool:
+    """Detect queries asking for a constrained answer from one article/context."""
+    text_stripped = _strip_diacritics(text_lower)
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    hints = (
+        "theo context",
+        "theo context",
+        "từ phần tổng quan này",
+        "tu phan tong quan nay",
+        "theo tổng quan này",
+        "theo tong quan nay",
+        "trong nghiên cứu này",
+        "trong nghien cuu nay",
+        "nghiên cứu này",
+        "nghien cuu nay",
+        "theo nghiên cứu này",
+        "theo nghien cuu nay",
+        "bài này",
+        "bai nay",
+    )
+    return any(hint in padded or hint in padded_stripped for hint in hints)
 
 
 def route_query(query: str) -> RouterOutput:
@@ -143,9 +322,30 @@ def route_query(query: str) -> RouterOutput:
         "fact_extraction": _count_matches(q, _FACT_KW),
     }
 
-    # Pick highest scoring type; default to fact_extraction
-    best_type = max(scores, key=scores.get)
-    best_score = scores[best_type]
+    explicit_comparison = _has_explicit_comparison(q)
+    single_document_question = _looks_single_document_question(q)
+    direct_fact_question = _has_direct_fact_question(q)
+
+    if explicit_comparison:
+        best_type = (
+            "guideline_comparison"
+            if scores["guideline_comparison"] > 0
+            else "comparative_synthesis"
+        )
+        best_score = max(max(scores.values()), 1)
+    elif (
+        direct_fact_question
+        and scores["research_appraisal"] == 0
+        and scores["comparative_synthesis"] == 0
+        and scores["guideline_comparison"] == 0
+        and scores["teaching_explainer"] == 0
+    ):
+        best_type = "fact_extraction"
+        best_score = max(scores["fact_extraction"], 1)
+    else:
+        # Pick highest scoring type; default to fact_extraction
+        best_type = max(scores, key=scores.get)
+        best_score = scores[best_type]
 
     # If no clear signal, default based on query length
     if best_score == 0:
@@ -156,6 +356,13 @@ def route_query(query: str) -> RouterOutput:
         else:
             best_type = "fact_extraction"
 
+    answer_style = _infer_answer_style(
+        q,
+        best_type,
+        direct_fact_question,
+        single_document_question,
+    )
+
     # Map type → downstream signals
     _TYPE_CONFIG = {
         "fact_extraction": {
@@ -163,7 +370,7 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": False,
             "requires_limitations": False,
             "requires_comparison": False,
-            "answer_style": "brief",
+            "answer_style": "exact",
             "retrieval_profile": "light",
             "needs_extractor": False,
             "retrieval_mode": "topic_summary",
@@ -173,7 +380,7 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": True,
             "requires_limitations": False,
             "requires_comparison": False,
-            "answer_style": "structured_study",
+            "answer_style": "exact",
             "retrieval_profile": "standard",
             "needs_extractor": True,
             "retrieval_mode": "article_centric",
@@ -183,7 +390,7 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": True,
             "requires_limitations": True,
             "requires_comparison": False,
-            "answer_style": "structured_study",
+            "answer_style": "appraisal",
             "retrieval_profile": "deep",
             "needs_extractor": True,
             "retrieval_mode": "article_centric",
@@ -193,7 +400,7 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": True,
             "requires_limitations": False,
             "requires_comparison": True,
-            "answer_style": "comparative",
+            "answer_style": "summary",
             "retrieval_profile": "deep",
             "needs_extractor": True,
             "retrieval_mode": "topic_summary",
@@ -203,7 +410,7 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": False,
             "requires_limitations": False,
             "requires_comparison": True,
-            "answer_style": "comparative",
+            "answer_style": "summary",
             "retrieval_profile": "standard",
             "needs_extractor": False,
             "retrieval_mode": "topic_summary",
@@ -213,14 +420,24 @@ def route_query(query: str) -> RouterOutput:
             "requires_numbers": False,
             "requires_limitations": False,
             "requires_comparison": False,
-            "answer_style": "teaching",
+            "answer_style": "summary",
             "retrieval_profile": "standard",
             "needs_extractor": False,
             "retrieval_mode": "mechanistic_synthesis",
         },
     }
 
-    config = _TYPE_CONFIG[best_type]
+    config = dict(_TYPE_CONFIG[best_type])
+    config["answer_style"] = answer_style
+    if best_type == "comparative_synthesis" and single_document_question:
+        config["retrieval_mode"] = "article_centric"
+        config["retrieval_profile"] = "standard"
+    if answer_style in {"exact", "summary", "bounded_partial"} and best_type != "research_appraisal":
+        config["needs_extractor"] = False
+    if answer_style == "exact" and not _asks_for_numeric_value(q):
+        config["requires_numbers"] = False
+    if answer_style == "summary" and best_type in {"fact_extraction", "guideline_comparison"}:
+        config["retrieval_mode"] = "article_centric"
 
     return RouterOutput(
         query_type=best_type,

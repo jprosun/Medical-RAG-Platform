@@ -37,6 +37,7 @@ class MockRouterOutput:
     """Minimal mock for RouterOutput."""
     query_type: str = "fact_extraction"
     retrieval_profile: str = "light"
+    retrieval_mode: str = "topic_summary"
     top_k_override: int = 8
     needs_extractor: bool = False
     requires_numbers: bool = False
@@ -172,3 +173,28 @@ def test_empty_chunks():
     result = aggregate_articles([], "test")
     assert result.primary.title == ""
     assert result.secondary == []
+
+
+def test_grouping_prefers_doc_id_over_fragmented_titles():
+    """Chunks from the same article should stay together even if titles fragment."""
+    chunks = [
+        RetrievedChunk(
+            id="c1",
+            text="relevant text one",
+            score=0.83,
+            metadata={"title": "artery stenosis;", "doc_id": "doc-1", "source_name": "VMJ"},
+        ),
+        RetrievedChunk(
+            id="c2",
+            text="relevant text two",
+            score=0.81,
+            metadata={
+                "title": "ĐIỀU TRỊ HẸP ĐỘNG MẠCH CẢNH BẰNG CEA HAY CAS",
+                "doc_id": "doc-1",
+                "source_name": "VMJ",
+            },
+        ),
+    ]
+    grouped = _group_chunks_by_article(chunks)
+    assert len(grouped) == 1
+    assert grouped[0].title == "ĐIỀU TRỊ HẸP ĐỘNG MẠCH CẢNH BẰNG CEA HAY CAS"

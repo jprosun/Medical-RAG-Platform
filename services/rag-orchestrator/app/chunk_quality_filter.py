@@ -56,6 +56,11 @@ _JOURNAL_REF = re.compile(
     re.IGNORECASE,
 )
 
+_JUNK_SECTION_MARKERS = re.compile(
+    r'(?:tài\s*liệu\s*tham\s*khảo|references|bibliography|phụ\s*lục|appendix|acknowledg(?:e)?ments?)',
+    re.IGNORECASE,
+)
+
 
 def is_junk_chunk(text: str) -> bool:
     """
@@ -204,6 +209,11 @@ def filter_chunks(
         # Hard reject on text
         if is_junk_chunk(chunk.text):
             continue
+
+        section_title = str(chunk.metadata.get("section_title", "") or "")
+        heading_path = str(chunk.metadata.get("heading_path", "") or "")
+        if _JUNK_SECTION_MARKERS.search(section_title) or _JUNK_SECTION_MARKERS.search(heading_path):
+            continue
         
         # Hard reject on title metadata
         title = chunk.metadata.get("title", "") or ""
@@ -244,6 +254,14 @@ _CITATION_TITLE = re.compile(
     r'^\d{4}[\s.;]+\d+\s*\(\d+\)',
 )
 
+_DENSE_CITATION_TITLE = re.compile(
+    r'^\d{4}[\s.;:]+\d+(?:\(\d+\))?[:;]\s*[A-Za-z]?\d+',
+)
+
+_LOWERCASE_FRAGMENT_TITLE = re.compile(
+    r'^[a-zà-ỹ].{0,80}$',
+)
+
 
 def _is_junk_title(title: str) -> bool:
     """Hard reject titles that are clearly garbage."""
@@ -266,6 +284,17 @@ def _is_junk_title(title: str) -> bool:
     # Title starts with volume/page pattern
     if re.match(r'^\d{4}\.\s*\d+\(\d+\)', t):
         return True
+
+    # Dense citation-like title fragment (e.g. "2024;12:1098765...")
+    if _DENSE_CITATION_TITLE.match(t):
+        return True
+
+    if sum(1 for c in t if c.isdigit()) / max(len(t), 1) > 0.25 and not re.search(r'[A-Za-zÀ-ỹ]{5,}', t):
+        return True
+
+    # Common crawl artifact: truncated lowercase fragment used as title
+    if _LOWERCASE_FRAGMENT_TITLE.match(t) and len(t.split()) <= 4:
+        return True
     
     return False
 
@@ -278,6 +307,10 @@ def _is_weak_title(title: str) -> bool:
     
     # Very short title
     if len(t) < 15:
+        return True
+
+    # Mid-sentence fragment or broken lowercase heading
+    if _LOWERCASE_FRAGMENT_TITLE.match(t):
         return True
     
     # Contains citation patterns

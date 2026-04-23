@@ -105,6 +105,7 @@ def rewrite_query(
             messages_payload,
             max_tokens=max_tokens,
             temperature=temperature,
+            attempt_budget=int(os.getenv("REWRITE_MAX_ATTEMPTS", "1")),
         )
         rewritten = rewritten.strip().strip('"').strip("'")
 

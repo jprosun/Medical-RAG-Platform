@@ -32,10 +32,12 @@ services:
       RAG_MAX_CONTEXT_TOKENS: "2000"
       REDIS_URL: redis://redis:6379/0
       KSERVE_ENABLED: "true"
-      KSERVE_BASE_URL: https://api.groq.com/openai
+      KSERVE_BASE_URL: https://openrouter.ai/api
       KSERVE_COMPLETIONS_PATH: /v1/chat/completions
-      LLM_MODEL_ID: llama-3.3-70b-versatile
-      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL_ID: meta-llama/llama-3.3-70b-instruct
+      LLM_API_KEY: ${OPEN_ROUTER_API_KEY:-}
+      LLM_HTTP_REFERER: http://localhost:8501
+      LLM_APP_NAME: llm-medqa-assistant
       LLM_MAX_TOKENS: "2048"
       LLM_TEMPERATURE: "0.3"
       LLM_TOP_P: "0.9"
@@ -43,6 +45,10 @@ services:
       LLM_PRESENCE_PENALTY: "0.4"
       LLM_TIMEOUT_S: "30"
       LLM_RETRIES: "1"
+      ASYNC_LLM_TITLE_ENABLED: "false"
+      LLM_REWRITER_ENABLED: "false"
+      LLM_EXTRACTOR_ENABLED: "false"
+      ALLOW_RATE_LIMIT_FALLBACK: "false"
       OTEL_SDK_DISABLED: "true"
     ports:
       - "8000:8000"

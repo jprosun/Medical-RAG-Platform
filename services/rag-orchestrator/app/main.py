@@ -1,6 +1,7 @@
 from uuid import uuid4
 import time
 import os
+import re
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
@@ -16,7 +17,7 @@ from .health import readiness, liveness
 from utils.logging import log_request
 from .retriever import build_retriever_from_env
 from .prompt import build_prompt, build_prompt_v2
-from .llm_client import build_kserve_client_from_env
+from .llm_client import build_kserve_client_from_env, UpstreamRateLimitError
 from .schemas import ChatRequest, ChatResponse
 from .query_router import route_query
 from .article_aggregator import aggregate_articles
@@ -50,10 +51,224 @@ from .query_rewriter import rewrite_query
 class TitleUpdate(BaseModel):
     title: str
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _is_eval_session(session_id: str) -> bool:
+    sid = (session_id or "").lower()
+    return sid.startswith(("eval_", "smoke_", "probe_"))
+
+
+def _build_optional_llm_client(flag_name: str, default: bool = True):
+    if not _env_flag(flag_name, default=default):
+        return None
+    return build_kserve_client_from_env()
+
+
+def _should_expand_primary_article(router_output, query: str) -> bool:
+    answer_style = getattr(router_output, "answer_style", "")
+    query_type = getattr(router_output, "query_type", "")
+    if answer_style == "exact":
+        return True
+    if query_type == "teaching_explainer":
+        return True
+
+    query_norm = (query or "").lower()
+    if answer_style in {"summary", "bounded_partial"}:
+        return any(
+            marker in query_norm
+            for marker in (
+                "vì sao", "vi sao", "tại sao", "tai sao",
+                "dựa trên", "dua tren", "nhóm yếu tố", "nhom yeu to",
+                "quyết định", "quyet dinh",
+            )
+        )
+    return False
+
+
+def _primary_expansion_max_chunks(router_output, query: str) -> int:
+    answer_style = getattr(router_output, "answer_style", "")
+    if answer_style == "exact":
+        return int(os.getenv("EXACT_PRIMARY_EXPANSION_CHUNKS", "8"))
+
+    query_norm = (query or "").lower()
+    focused_markers = (
+        "vì sao", "vi sao", "tại sao", "tai sao",
+        "dựa trên", "dua tren", "nhóm yếu tố", "nhom yeu to",
+        "quyết định", "quyet dinh", "chỉ số", "chi so", "tiêu chí", "tieu chi",
+    )
+    default_chunks = "8" if any(marker in query_norm for marker in focused_markers) else "6"
+    return int(os.getenv("FOCUSED_PRIMARY_EXPANSION_CHUNKS", default_chunks))
+
+
+_FALLBACK_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into",
+    "trong", "nhung", "những", "theo", "giua", "giữa", "cua", "của",
+    "mot", "một", "khong", "không", "dua", "dựa", "tren", "trên",
+    "nghien", "nghiên", "cuu", "cứu", "benh", "bệnh", "nhan", "nhân",
+}
+
+
+def _clean_extractive_text(text: str) -> str:
+    """Clean raw article text into a form suitable for extractive fallback."""
+    if not text:
+        return ""
+
+    kept = []
+    for line in text.splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if line.startswith(("Title:", "Source:", "Audience:", "Body:")):
+            continue
+        if line.startswith("Hình "):
+            continue
+        # Drop conference banners / page headers that are mostly uppercase noise.
+        letters = [c for c in line if c.isalpha()]
+        if letters:
+            upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+            if upper_ratio > 0.8 and len(line) > 24:
+                continue
+        kept.append(line)
+
+    cleaned = " ".join(kept)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _extractive_terms(text: str) -> set[str]:
+    terms = set()
+    for token in re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE):
+        if len(token) >= 4 and token not in _FALLBACK_STOPWORDS:
+            terms.add(token)
+    return terms
+
+
+def _looks_like_sentence_candidate(text: str) -> bool:
+    candidate = (text or "").strip()
+    if len(candidate) < 60:
+        return False
+    if len(candidate.split()) < 8:
+        return False
+    if re.match(r"^[a-zà-ỹ]", candidate):
+        return False
+    if re.match(r"^(và|hoặc|nhưng|cũng|đồng thời|chỉ|tuy nhiên)\b", candidate, flags=re.IGNORECASE):
+        return False
+    return True
+
+
+def _fallback_candidates_from_text(text: str) -> list[str]:
+    cleaned = _clean_extractive_text(text)
+    if not cleaned:
+        return []
+
+    sentences = [
+        s.strip(" -")
+        for s in re.split(r"(?<=[\.\?!;:])\s+", cleaned)
+        if s.strip()
+    ]
+    candidates = []
+    for sentence in sentences:
+        if len(sentence) <= 320 and _looks_like_sentence_candidate(sentence):
+            candidates.append(sentence)
+
+    # Add two-sentence windows for cases where the direct answer spans a wrap.
+    for i in range(len(sentences) - 1):
+        window = f"{sentences[i]} {sentences[i + 1]}".strip()
+        if 80 <= len(window) <= 420 and _looks_like_sentence_candidate(window):
+            candidates.append(window)
+
+    # If punctuation is poor, fall back to fixed-size spans from cleaned text.
+    if not candidates:
+        for i in range(0, len(cleaned), 220):
+            window = cleaned[i:i + 260].strip()
+            if len(window) >= 80:
+                candidates.append(window)
+            if len(candidates) >= 4:
+                break
+
+    return candidates
+
+
+def _build_rate_limit_fallback_answer(question: str, evidence_pack, coverage) -> str:
+    """Return a deterministic extractive fallback instead of surfacing a raw 500."""
+    primary = getattr(evidence_pack, "primary_source", None)
+    title = getattr(primary, "title", "") if primary else ""
+    scope = getattr(coverage, "allowed_answer_scope", "") if coverage else ""
+    raw_text = getattr(primary, "raw_text", "") if primary else ""
+
+    candidates = []
+    if primary:
+        for finding in getattr(primary, "key_findings", []) or []:
+            claim = (getattr(finding, "claim", "") or "").strip()
+            if claim:
+                candidates.append(claim)
+        conclusion = getattr(getattr(primary, "authors_conclusion", None), "text", "") or ""
+        if conclusion:
+            candidates.append(conclusion.strip())
+
+    candidates.extend(_fallback_candidates_from_text(raw_text))
+
+    seen = set()
+    scored = []
+    query_text = f"{question} {scope} {title}".lower()
+    query_terms = _extractive_terms(query_text)
+
+    for candidate in candidates:
+        norm = candidate.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        overlap = sum(1 for term in query_terms if term in norm)
+        numeric_bonus = 1 if re.search(r"\b\d+\b|%|OR|HR|AUC|n\s*=", candidate, flags=re.IGNORECASE) else 0
+        scored.append((overlap, numeric_bonus, len(candidate), candidate))
+
+    scored.sort(key=lambda x: (-x[0], -x[1], -x[2]))
+    top_sentences = [cand for _, _, _, cand in scored[:3]]
+
+    lines = [
+        "Hệ thống sinh câu trả lời đang bị giới hạn tốc độ từ nhà cung cấp mô hình, nên dưới đây là tóm tắt trích xuất trực tiếp từ tài liệu chính đã truy hồi.",
+    ]
+    if top_sentences:
+        lines.append("Tóm tắt nhanh:")
+        lines.extend(f"- {sentence}" for sentence in top_sentences)
+    else:
+        lines.append("Yêu cầu không bị mất, nhưng chưa thể tổng hợp câu trả lời đầy đủ ở lượt này.")
+    if title:
+        lines.append(f"Nguồn chính: [1] {title}")
+    return "\n".join(lines)
+
+
+def _build_degraded_mode_answer(reason: str) -> str:
+    if reason == "upstream_rate_limit":
+        return (
+            "Yêu cầu này đang ở `degraded_mode` vì mô hình sinh câu trả lời bị giới hạn tốc độ từ nhà cung cấp. "
+            "Kết quả semantic của lượt này không nên chấm chung với chất lượng trả lời cuối."
+        )
+    if reason == "llm_unavailable":
+        return (
+            "Yêu cầu này đang ở `degraded_mode` vì backend sinh câu trả lời chưa sẵn sàng. "
+            "Kết quả semantic của lượt này không nên dùng để đánh giá chất lượng hệ thống."
+        )
+    return (
+        "Yêu cầu này đang ở `degraded_mode`. "
+        "Kết quả semantic của lượt này không nên dùng để đánh giá chất lượng hệ thống."
+    )
+
+
 # ---------------------------------------------------------------------
 # Background Task
 # ---------------------------------------------------------------------
 def generate_and_save_title(session_id: str, prompt: str):
+    if not _env_flag("ASYNC_LLM_TITLE_ENABLED", default=False):
+        return
+    if _is_eval_session(session_id):
+        return
     kserve = build_kserve_client_from_env()
     if kserve:
         try:
@@ -62,7 +277,12 @@ def generate_and_save_title(session_id: str, prompt: str):
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompt}
             ]
-            title = kserve.generate(msgs, max_tokens=15, temperature=0.3)
+            title = kserve.generate(
+                msgs,
+                max_tokens=15,
+                temperature=0.3,
+                attempt_budget=int(os.getenv("TITLE_MAX_ATTEMPTS", "1")),
+            )
             title = title.strip().strip('"').strip("'")
             if title and len(title) < 100:
                 session_store.set_title(session_id, title)
@@ -227,7 +447,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             if len(history) == 0:
                 fallback_title = req.message[:30] + "..." if len(req.message) > 30 else req.message
                 session_store.set_title(session_id, fallback_title)
-                background_tasks.add_task(generate_and_save_title, session_id, req.message)
+                if _env_flag("ASYNC_LLM_TITLE_ENABLED", default=False) and not _is_eval_session(session_id):
+                    background_tasks.add_task(generate_and_save_title, session_id, req.message)
 
             # append user message + trace
             with tracer.start_as_current_span("session.append_user"):
@@ -235,7 +456,10 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
             # query rewriting for multi-turn conversations
             with tracer.start_as_current_span("query.rewrite") as span:
-                kserve_for_rewrite = build_kserve_client_from_env()
+                kserve_for_rewrite = _build_optional_llm_client(
+                    "LLM_REWRITER_ENABLED",
+                    default=True,
+                )
                 search_query = rewrite_query(
                     req.message, history, llm_client=kserve_for_rewrite
                 )
@@ -320,9 +544,37 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("article.secondary_count", len(aggregated.secondary))
                 span.set_attribute("article.total_count", len(aggregated.all_articles))
 
+            with tracer.start_as_current_span("article.primary_expand") as span:
+                answer_style = getattr(router_output, "answer_style", "")
+                if (
+                    retriever
+                    and aggregated.primary
+                    and aggregated.primary.chunks
+                    and _should_expand_primary_article(router_output, search_query)
+                ):
+                    expanded_primary_chunks = retriever.expand_primary_article_chunks(
+                        aggregated.primary,
+                        search_query,
+                        max_chunks=_primary_expansion_max_chunks(router_output, search_query),
+                    )
+                    aggregated.primary.chunks = expanded_primary_chunks
+                    aggregated.primary.chunk_count = len(expanded_primary_chunks)
+                    aggregated.primary.max_score = max((c.score for c in expanded_primary_chunks), default=0.0)
+                    aggregated.primary.avg_score = (
+                        sum(c.score for c in expanded_primary_chunks) / len(expanded_primary_chunks)
+                        if expanded_primary_chunks else 0.0
+                    )
+                span.set_attribute("article.primary_expanded_chunks", len(aggregated.primary.chunks))
+
             # ── 4. Evidence Extraction (conditional) ─────────────
             with tracer.start_as_current_span("evidence.extract") as span:
-                kserve_for_extract = build_kserve_client_from_env() if router_output.needs_extractor else None
+                extractor_enabled = _env_flag("LLM_EXTRACTOR_ENABLED", default=False)
+                kserve_for_extract = None
+                if router_output.needs_extractor and extractor_enabled:
+                    kserve_for_extract = _build_optional_llm_client(
+                        "LLM_EXTRACTOR_ENABLED",
+                        default=False,
+                    )
                 evidence_pack = extract_evidence(
                     aggregated, search_query, router_output, llm_client=kserve_for_extract
                 )
@@ -366,6 +618,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     os.getenv("LLM_MODEL_ID", "unknown"),
                 )
                 g0 = time.time()
+                degraded_mode = False
+                degraded_reason = None
 
                 if GUARDRAILS_ENABLED:
                     with tracer.start_as_current_span("guardrails.evaluate") as span:
@@ -381,27 +635,31 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     if kserve:
                         max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
                         temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-                        answer = kserve.generate(
-                            messages_payload,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                        )
+                        try:
+                            answer = kserve.generate(
+                                messages_payload,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                attempt_budget=int(os.getenv("ANSWER_MAX_ATTEMPTS", "2")),
+                            )
+                        except UpstreamRateLimitError as exc:
+                            RAG_FALLBACK_TOTAL.inc()
+                            request.state.error_message = str(exc)
+                            degraded_mode = True
+                            degraded_reason = "upstream_rate_limit"
+                            if _env_flag("ALLOW_RATE_LIMIT_FALLBACK", default=False):
+                                answer = _build_rate_limit_fallback_answer(
+                                    search_query,
+                                    evidence_pack,
+                                    coverage,
+                                )
+                            else:
+                                answer = _build_degraded_mode_answer(degraded_reason)
                     else:
                         RAG_FALLBACK_TOTAL.inc()
-                        if chunks:
-                            answer = (
-                                "General information based on available context:\n\n"
-                                + "\n\n".join(
-                                    f"- {c.text} [source:{c.id}]"
-                                    for c in chunks[:3]
-                                )
-                                + "\n\n(Configure KSERVE_URL for full generation.)"
-                            )
-                        else:
-                            answer = (
-                                "I don't have enough context. "
-                                "Ingest documents into Qdrant first."
-                            )
+                        degraded_mode = True
+                        degraded_reason = "llm_unavailable"
+                        answer = _build_degraded_mode_answer(degraded_reason)
                 llm_ms = round((time.time() - g0) * 1000.0, 2)
 
             kserve = build_kserve_client_from_env()
@@ -426,6 +684,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 history=history,
                 context_used=len(chunks),
                 retrieved_chunks=chunks_out,
+                degraded_mode=degraded_mode,
+                degraded_reason=degraded_reason,
             )
     finally:
         RAG_INFLIGHT.dec()

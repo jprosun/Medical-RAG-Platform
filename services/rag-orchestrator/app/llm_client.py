@@ -12,6 +12,15 @@ from .metrics_llm import (
     LLM_COMPLETION_TOKENS_TOTAL,
 )
 
+
+class UpstreamRateLimitError(RuntimeError):
+    """Raised when the upstream LLM keeps throttling after bounded retries."""
+
+    def __init__(self, message: str, wait_s: float = 0.0):
+        super().__init__(message)
+        self.wait_s = wait_s
+
+
 class KServeClient:
     """
     OpenAI-compatible *COMPLETIONS* client.
@@ -48,6 +57,7 @@ class KServeClient:
         prompt_or_messages: str | list,
         max_tokens: int = 512,
         temperature: float = 0.2,
+        attempt_budget: Optional[int] = None,
     ) -> str:
         """
         Generate text using OpenAI *Chat Completions* contract.
@@ -70,10 +80,20 @@ class KServeClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        referer = (os.getenv("LLM_HTTP_REFERER") or "").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        app_name = (os.getenv("LLM_APP_NAME") or "").strip()
+        if app_name:
+            headers["X-Title"] = app_name
 
         last_err = None
+        # Provider throttling is common during benchmark batches.
+        # Keep a small minimum retry budget even if env sets retries too low.
+        min_attempts = max(1, int(os.getenv("LLM_MIN_ATTEMPTS", "4")))
+        max_attempts = attempt_budget or max(self.retries + 1, min_attempts)
 
-        for attempt in range(self.retries + 1):
+        for attempt in range(max_attempts):
             try:
                 start = time.time()
                 r = requests.post(
@@ -91,13 +111,18 @@ class KServeClient:
                 # Phase 4: Handle 429 rate limit with longer backoff
                 if r.status_code == 429:
                     retry_after = r.headers.get("Retry-After", "")
-                    wait_s = float(retry_after) if retry_after.replace(".", "").isdigit() else 10.0
-                    wait_s = max(wait_s, 10.0)  # minimum 10s for rate limit
-                    print(f"[LLM] 429 rate limit hit, waiting {wait_s}s (attempt {attempt + 1}/{self.retries + 1})")
-                    if attempt < self.retries:
+                    wait_s = float(retry_after) if retry_after.replace(".", "").isdigit() else 0.0
+                    backoff_s = self.retry_backoff_s * (2 ** attempt)
+                    max_wait_s = float(os.getenv("LLM_MAX_RATE_LIMIT_WAIT_S", "30"))
+                    wait_s = min(max(wait_s, backoff_s, 10.0), max_wait_s)
+                    print(f"[LLM] 429 rate limit hit, waiting {wait_s}s (attempt {attempt + 1}/{max_attempts})")
+                    if attempt < max_attempts - 1:
                         time.sleep(wait_s)
                         continue
-                    raise RuntimeError(f"Rate limit exceeded after {self.retries + 1} attempts")
+                    raise UpstreamRateLimitError(
+                        f"Rate limit exceeded after {max_attempts} attempts",
+                        wait_s=wait_s,
+                    )
 
                 r.raise_for_status()
                 data = r.json()
@@ -133,7 +158,7 @@ class KServeClient:
                     status="error",
                 ).inc()
                 last_err = e
-                if attempt < self.retries:
+                if attempt < max_attempts - 1:
                     # Use longer backoff for subsequent retries
                     backoff = self.retry_backoff_s * (attempt + 1)
                     time.sleep(backoff)

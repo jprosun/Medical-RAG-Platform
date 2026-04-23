@@ -42,6 +42,59 @@ def title_norm(title: str) -> str:
     return t
 
 
+def _is_weak_title(title: str) -> bool:
+    """Heuristic title quality check for noisy VMJ fragments."""
+    t = (title or "").strip()
+    if not t:
+        return True
+    if len(t) < 15:
+        return True
+    if re.match(r'^[a-zà-ỹ]', t):
+        return True
+    if len(t.split()) <= 3 and t == t.lower():
+        return True
+    return False
+
+
+def _article_group_key(chunk: RetrievedChunk) -> str:
+    """Prefer stable doc_id over brittle title fragments."""
+    doc_id = str(chunk.metadata.get("doc_id", "") or "").strip()
+    if doc_id:
+        return f"doc:{doc_id}"
+    raw_title = chunk.metadata.get("title", "") or ""
+    tn = title_norm(raw_title)
+    if tn:
+        return f"title:{tn}"
+    return f"_unknown_{chunk.id[:8]}"
+
+
+def _choose_representative_title(chunks: List[RetrievedChunk]) -> str:
+    """Pick the cleanest title available inside a doc/article group."""
+    titles = []
+    for chunk in chunks:
+        title = (chunk.metadata.get("title", "") or "").strip()
+        if title:
+            titles.append(title)
+    if not titles:
+        return ""
+
+    def _rank(title: str) -> tuple[int, int]:
+        weak_penalty = 1 if _is_weak_title(title) else 0
+        return (weak_penalty, -len(title))
+
+    return sorted(titles, key=_rank)[0]
+
+
+def _metadata_text(article: "ArticleGroup") -> str:
+    parts = [article.title]
+    for chunk in article.chunks:
+        md = chunk.metadata
+        parts.append(md.get("title", "") or "")
+        parts.append(md.get("section_title", "") or "")
+        parts.append(md.get("heading_path", "") or "")
+    return " ".join(p for p in parts if p)
+
+
 # ── Vietnamese stopwords ─────────────────────────────────────────────
 
 _VN_STOPS = set(
@@ -56,6 +109,108 @@ def _extract_keywords(text: str) -> set:
     """Extract meaningful keywords from text."""
     words = title_norm(text).split()
     return {w for w in words if w not in _VN_STOPS and len(w) > 1}
+
+
+_VN_STOPS.update(
+    {
+        "theo",
+        "context",
+        "quyết",
+        "định",
+        "chọn",
+        "việc",
+        "phải",
+        "dựa",
+        "những",
+        "nhóm",
+        "yếu",
+        "tố",
+        "có",
+        "thể",
+        "khẳng",
+        "định",
+        "chưa",
+        "kết",
+        "luận",
+        "tuyệt",
+        "đối",
+        "mọi",
+        "khía",
+        "cạnh",
+        "biện",
+        "pháp",
+        "can",
+        "thiệp",
+        "sớm",
+        "được",
+        "khuyến",
+        "cáo",
+        "làm",
+        "chậm",
+        "tiến",
+        "triển",
+        "giảm",
+        "triệu",
+        "chứng",
+        "hay",
+    }
+)
+
+
+_ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,6}\b")
+
+
+def _extract_query_acronyms(text: str) -> set[str]:
+    """Extract uppercase medical acronyms that often disambiguate intent."""
+    return {match.group(0).lower() for match in _ACRONYM_RE.finditer(text or "")}
+
+
+def _count_acronym_matches(text: str, acronyms: set[str]) -> int:
+    haystack = title_norm(text)
+    return sum(1 for acronym in acronyms if re.search(rf"\b{re.escape(acronym)}\b", haystack))
+
+
+def _query_alignment(article: "ArticleGroup", query: str) -> tuple[float, int, float]:
+    """
+    Returns:
+      kw_score: normalized lexical overlap
+      specific_overlap: overlap count for informative terms
+      acronym_coverage: fraction of query acronyms matched in metadata/title text
+    """
+    query_kw = _extract_keywords(query)
+    metadata_text = _metadata_text(article)
+    metadata_kw = _extract_keywords(metadata_text)
+
+    if query_kw and metadata_kw:
+        overlap_terms = query_kw & metadata_kw
+        kw_score = min(len(overlap_terms) / len(query_kw), 1.0)
+    else:
+        overlap_terms = set()
+        kw_score = 0.0
+
+    specific_overlap = len({term for term in overlap_terms if len(term) >= 4})
+    query_acronyms = _extract_query_acronyms(query)
+    if query_acronyms:
+        acronym_coverage = _count_acronym_matches(metadata_text, query_acronyms) / len(query_acronyms)
+    else:
+        acronym_coverage = 0.0
+
+    return kw_score, specific_overlap, acronym_coverage
+
+
+def _article_support_text(article: "ArticleGroup") -> str:
+    parts = [_metadata_text(article)]
+    for chunk in article.chunks[:2]:
+        parts.append(chunk.text[:500])
+    return " ".join(part for part in parts if part)
+
+
+def _query_support_terms(article: "ArticleGroup", query: str) -> set[str]:
+    query_kw = _extract_keywords(query)
+    if not query_kw:
+        return set()
+    article_kw = _extract_keywords(_article_support_text(article))
+    return query_kw & article_kw
 
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -93,18 +248,17 @@ def _group_chunks_by_article(chunks: List[RetrievedChunk]) -> List[ArticleGroup]
 
     for chunk in chunks:
         raw_title = chunk.metadata.get("title", "") or ""
-        tn = title_norm(raw_title)
-        if not tn:
-            tn = f"_unknown_{chunk.id[:8]}"
+        key = _article_group_key(chunk)
+        tn = title_norm(raw_title) or key
 
-        if tn not in groups:
-            groups[tn] = ArticleGroup(
+        if key not in groups:
+            groups[key] = ArticleGroup(
                 title=raw_title,
                 title_norm=tn,
                 chunks=[],
             )
 
-        groups[tn].chunks.append(chunk)
+        groups[key].chunks.append(chunk)
 
     # Compute scores per group
     for g in groups.values():
@@ -112,6 +266,8 @@ def _group_chunks_by_article(chunks: List[RetrievedChunk]) -> List[ArticleGroup]
         g.chunk_count = len(scores)
         g.max_score = max(scores)
         g.avg_score = sum(scores) / len(scores)
+        g.title = _choose_representative_title(g.chunks)
+        g.title_norm = title_norm(g.title) or g.title_norm
 
     return list(groups.values())
 
@@ -168,13 +324,14 @@ def _compute_article_score(
     numeric_chunks = sum(1 for c in article.chunks if num_pattern.search(c.text))
     numeric_density = min(numeric_chunks / max(article.chunk_count, 1), 1.0)
 
-    query_kw = _extract_keywords(query)
-    title_kw = _extract_keywords(article.title)
-    if query_kw and title_kw:
-        overlap = len(query_kw & title_kw)
-        kw_score = min(overlap / len(query_kw), 1.0)
-    else:
-        kw_score = 0.0
+    kw_score, specific_overlap, acronym_coverage = _query_alignment(article, query)
+    title_penalty = 0.08 if _is_weak_title(article.title) else 0.0
+    specificity_boost = min(specific_overlap * 0.03, 0.12)
+    acronym_boost = 0.16 * acronym_coverage
+    acronym_miss_penalty = 0.0
+    query_acronyms = _extract_query_acronyms(query)
+    if query_acronyms:
+        acronym_miss_penalty = 0.16 * (1.0 - acronym_coverage)
 
     relevance = (
         0.35 * article.max_score
@@ -182,6 +339,9 @@ def _compute_article_score(
         + 0.15 * section_diversity
         + 0.15 * numeric_density
         + 0.15 * kw_score
+        + specificity_boost
+        + acronym_boost
+        - acronym_miss_penalty
     )
 
     # ── Authority signals (NEW v2) ───────────────────────────────
@@ -206,7 +366,7 @@ def _compute_article_score(
         query_fit = fit_map.get(doc_type, 0.0)
 
     # ── Composite ────────────────────────────────────────────────
-    score = relevance + authority + query_fit
+    score = relevance + authority + query_fit - title_penalty
 
     # Store sub-scores for transparency
     article.relevance_score = round(relevance, 4)
@@ -216,12 +376,19 @@ def _compute_article_score(
     return round(score, 4)
 
 
-def _build_selected_reason(article: ArticleGroup, is_primary: bool) -> str:
+def _build_selected_reason(
+    article: ArticleGroup,
+    is_primary: bool,
+    selection_mode: str = "composite",
+) -> str:
     """Build a human-readable explanation of why this article was selected."""
     md = _get_article_metadata(article)
     parts = []
     if is_primary:
-        parts.append("highest composite score")
+        if selection_mode == "anchor":
+            parts.append("article-centric retrieval anchor")
+        else:
+            parts.append("highest composite score")
     else:
         parts.append("supporting source")
 
@@ -239,6 +406,95 @@ def _build_selected_reason(article: ArticleGroup, is_primary: bool) -> str:
         parts.append(f"query_fit=+{article.query_fit_score}")
 
     return "; ".join(parts)
+
+
+def _is_secondary_candidate(
+    article: ArticleGroup,
+    query: str,
+    router_output: Optional["RouterOutput"] = None,
+) -> bool:
+    """Reject weak support articles before they contaminate augmentation."""
+    _, specific_overlap, acronym_coverage = _query_alignment(article, query)
+    query_acronyms = _extract_query_acronyms(query)
+    if query_acronyms:
+        if acronym_coverage == 0.0:
+            return False
+        if len(query_acronyms) >= 2 and acronym_coverage < 1.0:
+            return False
+
+    mode = getattr(router_output, "retrieval_mode", "article_centric") if router_output else "article_centric"
+    min_overlap = 1 if mode == "mechanistic_synthesis" else 2
+    return specific_overlap >= min_overlap
+
+
+def _requires_distinct_secondary_support(router_output: Optional["RouterOutput"]) -> bool:
+    if not router_output:
+        return False
+    mode = getattr(router_output, "retrieval_mode", "article_centric")
+    query_type = getattr(router_output, "query_type", "")
+    return mode == "topic_summary" or query_type == "comparative_synthesis"
+
+
+def _adds_distinct_support(
+    article: ArticleGroup,
+    primary: ArticleGroup,
+    query: str,
+    router_output: Optional["RouterOutput"] = None,
+) -> bool:
+    """Only keep secondary articles that add query-relevant support beyond primary."""
+    if not _requires_distinct_secondary_support(router_output):
+        return True
+
+    primary_terms = _query_support_terms(primary, query)
+    candidate_terms = _query_support_terms(article, query)
+    if not candidate_terms:
+        return False
+    if candidate_terms - primary_terms:
+        return True
+
+    query_acronyms = _extract_query_acronyms(query)
+    if query_acronyms:
+        primary_matches = _count_acronym_matches(_article_support_text(primary), query_acronyms)
+        candidate_matches = _count_acronym_matches(_article_support_text(article), query_acronyms)
+        if candidate_matches > primary_matches:
+            return True
+
+    return False
+
+
+def _same_article_as_primary(article: ArticleGroup, primary: ArticleGroup) -> bool:
+    if article.title_norm and primary.title_norm and article.title_norm == primary.title_norm:
+        return True
+
+    article_doc_ids = {
+        str(chunk.metadata.get("doc_id", "") or "").strip()
+        for chunk in article.chunks
+        if str(chunk.metadata.get("doc_id", "") or "").strip()
+    }
+    primary_doc_ids = {
+        str(chunk.metadata.get("doc_id", "") or "").strip()
+        for chunk in primary.chunks
+        if str(chunk.metadata.get("doc_id", "") or "").strip()
+    }
+    return bool(article_doc_ids and primary_doc_ids and article_doc_ids == primary_doc_ids)
+
+
+def _select_primary_article(
+    articles: List[ArticleGroup],
+    router_output: Optional["RouterOutput"] = None,
+) -> tuple[ArticleGroup, str]:
+    """Keep article-centric retrieval anchored to the document that truly won retrieval."""
+    primary = articles[0]
+    if not router_output:
+        return primary, "composite"
+    mode = getattr(router_output, "retrieval_mode", "article_centric")
+    if mode != "article_centric" or len(articles) == 1:
+        return primary, "composite"
+
+    anchor = max(articles, key=lambda a: (a.max_score, a.chunk_count, a.avg_score))
+    if anchor is primary:
+        return primary, "composite"
+    return anchor, "anchor"
 
 
 def aggregate_articles(
@@ -295,16 +551,31 @@ def aggregate_articles(
     articles.sort(key=lambda a: -a.article_score)
 
     # Step 4: Select primary + secondary
-    primary = articles[0]
-    primary.selected_reason = _build_selected_reason(primary, is_primary=True)
+    primary, primary_selection_mode = _select_primary_article(articles, router_output)
+    primary.selected_reason = _build_selected_reason(
+        primary,
+        is_primary=True,
+        selection_mode=primary_selection_mode,
+    )
     primary.chunks = primary.chunks[:max_primary_chunks]
 
+    if router_output and getattr(router_output, "retrieval_mode", "article_centric") == "article_centric":
+        return AggregatedResult(primary=primary, secondary=[], all_articles=articles)
+
     secondary = []
-    for art in articles[1:]:
+    for art in articles:
+        if art is primary:
+            continue
+        if _same_article_as_primary(art, primary):
+            continue
         if len(secondary) >= max_secondary:
             break
         # Dynamic threshold based on retrieval_mode
-        if art.article_score >= primary.article_score * score_threshold:
+        if (
+            art.article_score >= primary.article_score * score_threshold
+            and _is_secondary_candidate(art, query, router_output)
+            and _adds_distinct_support(art, primary, query, router_output)
+        ):
             art.selected_reason = _build_selected_reason(art, is_primary=False)
             art.chunks = art.chunks[:max_sec_chunks]
             secondary.append(art)

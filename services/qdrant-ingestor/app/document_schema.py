@@ -2,20 +2,17 @@
 Standardized document schema for the medical knowledge RAG corpus.
 
 Every knowledge unit (article section, guideline recommendation, FAQ entry, etc.)
-is normalised into a DocumentRecord before chunking and indexing.  The JSONL files
-produced by ETL pipelines MUST conform to this schema.
+is normalized into a DocumentRecord before chunking and indexing. JSONL files
+produced by ETL pipelines should conform to this schema.
 """
 
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, List, Optional
 
 
-# ── valid enum values ────────────────────────────────────────────────
 VALID_DOC_TYPES = frozenset(
     {"guideline", "textbook", "faq", "patient_education", "review", "reference"}
 )
@@ -23,7 +20,6 @@ VALID_AUDIENCES = frozenset({"patient", "student", "clinician"})
 VALID_TRUST_TIERS = frozenset({1, 2, 3})
 
 
-# ── core dataclass ───────────────────────────────────────────────────
 @dataclass
 class DocumentRecord:
     """A single knowledge unit ready for chunking and indexing."""
@@ -33,22 +29,35 @@ class DocumentRecord:
     body: str
     source_name: str
 
-    # optional but strongly recommended
     section_title: str = ""
     source_url: str = ""
-    doc_type: str = "reference"          # guideline | textbook | faq | patient_education | review | reference
-    specialty: str = "general"           # cardiology, endocrinology, orthopedics, …
-    audience: str = "patient"            # patient | student | clinician
+    source_id: str = ""
+    source_file: str = ""
+    raw_path: str = ""
+    processed_path: str = ""
+    intermediate_path: str = ""
+    parent_file: str = ""
+    source_sha256: str = ""
+    crawl_run_id: str = ""
+    etl_run_id: str = ""
+    doc_type: str = "reference"
+    specialty: str = "general"
+    audience: str = "patient"
     language: str = "en"
-    trust_tier: int = 3                  # 1 = canonical guidance, 2 = reference, 3 = patient-friendly
-    published_at: str = ""               # ISO-8601 date string
+    canonical_title: str = ""
+    language_confidence: float = 0.0
+    is_mixed_language: bool = False
+    trust_tier: int = 3
+    published_at: str = ""
     updated_at: str = ""
+    quality_score: Optional[int] = None
+    quality_status: str = ""
+    quality_flags: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
-    heading_path: str = ""               # "Hypertension > Management > First-line"
+    heading_path: str = ""
 
-    # ── validation ───────────────────────────────────────────────────
     def validate(self) -> List[str]:
-        """Return a list of human-readable validation errors (empty = valid)."""
+        """Return a list of human-readable validation errors (empty means valid)."""
         errors: List[str] = []
 
         if not self.doc_id or not self.doc_id.strip():
@@ -70,7 +79,6 @@ class DocumentRecord:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    # ── serialise ────────────────────────────────────────────────────
     def to_jsonl_line(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
@@ -79,14 +87,41 @@ class DocumentRecord:
         """Create a DocumentRecord from a dict, ignoring unknown keys."""
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in d.items() if k in known}
-        # coerce tags to list
+
         tags = filtered.get("tags", [])
         if isinstance(tags, str):
             filtered["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+
+        quality_flags = filtered.get("quality_flags", [])
+        if isinstance(quality_flags, str):
+            filtered["quality_flags"] = [t.strip() for t in quality_flags.split(",") if t.strip()]
+
+        trust_tier = filtered.get("trust_tier")
+        if isinstance(trust_tier, str) and trust_tier.isdigit():
+            filtered["trust_tier"] = int(trust_tier)
+
+        quality_score = filtered.get("quality_score")
+        if isinstance(quality_score, str) and quality_score.isdigit():
+            filtered["quality_score"] = int(quality_score)
+
+        language_confidence = filtered.get("language_confidence")
+        if isinstance(language_confidence, str):
+            try:
+                filtered["language_confidence"] = float(language_confidence)
+            except ValueError:
+                pass
+
+        is_mixed_language = filtered.get("is_mixed_language")
+        if isinstance(is_mixed_language, str):
+            filtered["is_mixed_language"] = is_mixed_language.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+
         return cls(**filtered)
 
 
-# ── JSONL reader ─────────────────────────────────────────────────────
 def iter_jsonl(path: str) -> Iterator[DocumentRecord]:
     """Yield DocumentRecord objects from a JSONL file, skipping blank lines."""
     with open(path, "r", encoding="utf-8") as fh:
@@ -97,5 +132,5 @@ def iter_jsonl(path: str) -> Iterator[DocumentRecord]:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"{path}:{lineno}: invalid JSON – {exc}") from exc
+                raise ValueError(f"{path}:{lineno}: invalid JSON - {exc}") from exc
             yield DocumentRecord.from_dict(obj)

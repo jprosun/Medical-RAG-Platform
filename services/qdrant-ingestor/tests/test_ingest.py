@@ -50,6 +50,7 @@ from app.ingest import (
     generate_stable_id,
     ingest_enriched_jsonl,
 )
+from app.ingest_quality import evaluate_document_quality
 
 
 # =====================================================================
@@ -102,11 +103,17 @@ class TestDocumentRecord:
             body="Body text.",
             source_name="Src",
             tags=["a", "b"],
+            source_file="rag-data/sources/src/processed/a.txt",
+            source_sha256="sha",
+            etl_run_id="run_1",
         )
         line = rec.to_jsonl_line()
         restored = DocumentRecord.from_dict(json.loads(line))
         assert restored.doc_id == rec.doc_id
         assert restored.tags == ["a", "b"]
+        assert restored.source_file == "rag-data/sources/src/processed/a.txt"
+        assert restored.source_sha256 == "sha"
+        assert restored.etl_run_id == "run_1"
 
     def test_from_dict_ignores_unknown_keys(self):
         d = {
@@ -174,6 +181,36 @@ class TestSplitByHeadings:
     def test_no_headings_returns_empty(self):
         text = "Just plain text without any headings at all."
         assert split_by_headings(text) == []
+
+    def test_plain_vietnamese_headings(self):
+        text = (
+            "TÓM TẮT\n"
+            "Nội dung tóm tắt của bài báo.\n"
+            "KẾT QUẢ\n"
+            "Kết quả chính của nghiên cứu.\n"
+            "KẾT LUẬN\n"
+            "Kết luận cuối cùng."
+        )
+        sections = split_by_headings(text)
+        assert len(sections) == 3
+        assert sections[0].title.upper() == "TÓM TẮT"
+        assert "tóm tắt" in sections[0].body.lower()
+        assert sections[1].title.upper() == "KẾT QUẢ"
+        assert sections[2].heading_path.upper() == "KẾT LUẬN"
+
+    def test_inline_vietnamese_headings(self):
+        text = (
+            "TÓM TẮT1 Mục tiêu: Mô tả đặc điểm lâm sàng.\n"
+            "Phương pháp: Nghiên cứu mô tả cắt ngang.\n"
+            "Kết quả: Tỷ lệ cải thiện là 85%.\n"
+            "KẾT LUẬN: Can thiệp sớm có lợi.\n"
+        )
+        sections = split_by_headings(text)
+        assert len(sections) == 3
+        assert sections[0].title.upper() == "TÓM TẮT"
+        assert sections[0].body.startswith("Mục tiêu:")
+        assert sections[1].title.upper() == "KẾT QUẢ"
+        assert sections[2].title.upper() == "KẾT LUẬN"
 
     def test_nested_headings_path(self):
         text = "# A\n\n## B\n\n### C\nDeep content."
@@ -298,20 +335,32 @@ class TestIngestEnrichedJsonl:
         records = [
             {
                 "doc_id": "test_record_1",
-                "title": "Test Disease",
+                "title": "Bệnh học thử nghiệm",
+                "canonical_title": "Vai trò can thiệp sớm trong bệnh học thử nghiệm",
                 "section_title": "Overview",
-                "body": "# Overview\nTest body content.\n## Details\nMore details.",
+                "body": (
+                    "TÓM TẮT\n"
+                    + ("Can thiệp sớm giúp cải thiện kết cục lâm sàng. " * 12)
+                    + "\nKẾT QUẢ\n"
+                    + ("Nhóm điều trị sớm đạt kết quả tốt hơn nhóm chứng. " * 12)
+                ),
                 "source_name": "TestSource",
                 "source_url": "https://example.com/test",
+                "source_id": "test_source",
+                "source_file": "rag-data/sources/test_source/processed/test.txt",
+                "processed_path": "rag-data/sources/test_source/processed/test.txt",
+                "source_sha256": "sha256-test",
+                "etl_run_id": "etl-run-test",
                 "doc_type": "patient_education",
                 "specialty": "cardiology",
                 "audience": "patient",
-                "language": "en",
+                "language": "vi",
                 "trust_tier": 3,
                 "published_at": "2025-01-01",
                 "updated_at": "2026-01-01",
                 "tags": ["test", "cardiology"],
                 "heading_path": "Test Disease > Overview",
+                "quality_status": "go",
             },
         ]
         fp = tmp_path / "test.jsonl"
@@ -331,10 +380,20 @@ class TestIngestEnrichedJsonl:
         assert "testsource" in ch.id  # stable ID contains source
         assert "test_record_1" in ch.id
         assert ch.metadata["source_name"] == "TestSource"
+        assert ch.metadata["source_id"] == "test_source"
+        assert ch.metadata["source_file"] == "rag-data/sources/test_source/processed/test.txt"
+        assert ch.metadata["processed_path"] == "rag-data/sources/test_source/processed/test.txt"
+        assert ch.metadata["source_sha256"] == "sha256-test"
+        assert ch.metadata["etl_run_id"] == "etl-run-test"
         assert ch.metadata["specialty"] == "cardiology"
         assert ch.metadata["trust_tier"] == 3
         assert ch.metadata["doc_type"] == "patient_education"
-        assert "Title: Test Disease" in ch.text  # context header prepended
+        assert ch.metadata["title"] == "Vai trò can thiệp sớm trong bệnh học thử nghiệm"
+        assert ch.metadata["raw_title"] == "Bệnh học thử nghiệm"
+        assert ch.metadata["section_type"] in {"abstract", "results"}
+        assert ch.metadata["chunk_role"] in {"high_signal", "evidence"}
+        assert ch.metadata["quality_status"] in {"go", "review"}
+        assert "Title: Vai trò can thiệp sớm trong bệnh học thử nghiệm" in ch.text
 
     def test_validation_error_skipped(self, tmp_path):
         # Record with empty required fields
@@ -355,6 +414,102 @@ class TestIngestEnrichedJsonl:
         # Only the valid record should produce chunks
         assert len(chunks) >= 1
         assert all("good" in ch.id or "src" in ch.id for ch in chunks)
+
+    def test_quality_gate_skips_low_quality_records(self, tmp_path):
+        records = [
+            {
+                "doc_id": "hold_doc",
+                "title": "T",
+                "body": "Ngắn",
+                "source_name": "Src",
+                "source_url": "",
+                "doc_type": "reference",
+                "audience": "patient",
+                "language": "vi",
+                "trust_tier": 3,
+            },
+            {
+                "doc_id": "review_doc",
+                "title": "Bài báo có cấu trúc rõ ràng",
+                "body": (
+                    "TÓM TẮT\n"
+                    + ("Can thiệp giúp cải thiện tiên lượng. " * 15)
+                    + "\nKẾT LUẬN\n"
+                    + ("Khuyến nghị theo dõi định kỳ sau điều trị. " * 10)
+                ),
+                "source_name": "Src",
+                "source_url": "https://example.com/review",
+                "doc_type": "reference",
+                "audience": "patient",
+                "language": "vi",
+                "trust_tier": 3,
+            },
+        ]
+        fp = tmp_path / "test.jsonl"
+        fp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+
+        chunks = ingest_enriched_jsonl(
+            input_path=str(tmp_path),
+            patterns=["*.jsonl"],
+            chunk_size=900,
+            overlap=150,
+            min_quality_status="review",
+        )
+
+        assert chunks
+        assert all(ch.metadata["doc_id"] == "review_doc" for ch in chunks)
+
+    def test_reference_sections_are_skipped(self, tmp_path):
+        records = [
+            {
+                "doc_id": "doc_with_refs",
+                "title": "Tài liệu có tham khảo",
+                "body": (
+                    "KẾT QUẢ\n"
+                    + ("Kết quả lâm sàng cho thấy cải thiện rõ. " * 12)
+                    + "\nTÀI LIỆU THAM KHẢO\n"
+                    + "[1] Nguyen A. Example study. BMJ. 2024.\n"
+                    + "[2] Tran B. Another study. doi:10.1000/test.\n"
+                ),
+                "source_name": "Src",
+                "source_url": "https://example.com/doc",
+                "doc_type": "reference",
+                "audience": "patient",
+                "language": "vi",
+                "trust_tier": 3,
+            },
+        ]
+        fp = tmp_path / "test.jsonl"
+        fp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+
+        chunks = ingest_enriched_jsonl(
+            input_path=str(tmp_path),
+            patterns=["*.jsonl"],
+            chunk_size=900,
+            overlap=150,
+        )
+
+        assert chunks
+        assert all(ch.metadata["section_type"] != "references" for ch in chunks)
+        assert all("doi:10.1000/test" not in ch.text.lower() for ch in chunks)
+
+
+class TestIngestQuality:
+    def test_presectionized_record_not_flagged_no_sections(self):
+        record = {
+            "title": "Monitoring Health For The SDGs",
+            "canonical_title": "Monitoring Health For The SDGs",
+            "section_title": "Monitoring Health For The SDGs (phần 1)",
+            "heading_path": "Monitoring Health For The SDGs > phần 1",
+            "body": "Đây là phần đầu của tài liệu dài. " * 50,
+            "source_name": "WHO",
+            "source_url": "https://example.com",
+            "doc_type": "reference",
+            "language": "vi",
+            "_section_count": 0,
+        }
+        quality = evaluate_document_quality(record)
+        assert "no_sections_detected" not in quality["quality_flags"]
 
     def test_no_jsonl_files_raises(self, tmp_path):
         with pytest.raises(SystemExit, match="No .jsonl files"):

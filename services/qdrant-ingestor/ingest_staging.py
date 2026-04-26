@@ -13,8 +13,11 @@ import sys
 import time
 import tempfile
 import shutil
+from pathlib import Path
 
 # Add parent paths so imports work
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, os.path.abspath("."))
 
 from app.ingest import (
@@ -24,17 +27,39 @@ from app.ingest import (
 )
 from qdrant_client import QdrantClient
 from fastembed import TextEmbedding
+from services.utils.data_paths import preferred_dataset_records_path, preferred_records_path
 
 # ── Configuration ───────────────────────────────────────────────────
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.getenv("QDRANT_COLLECTION", "staging_medqa")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-DATA_PATH = os.getenv("DATA_PATH", "../../data/data_final")
-DATA_FILE = os.getenv("DATA_FILE", "combined.jsonl")
+DATA_PATH = os.getenv("DATA_PATH", "")
+DATA_FILE = os.getenv("DATA_FILE", "")
+DATASET_ID = os.getenv("DATASET_ID", "")
+DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID", "")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
 OVERLAP = int(os.getenv("OVERLAP", "150"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "64"))
 REMOTE_EMBED_URL = os.getenv("REMOTE_EMBED_URL", "")
+MIN_QUALITY_STATUS = os.getenv("INGEST_MIN_QUALITY_STATUS", "review")
+
+
+def _resolve_source_file() -> str:
+    if DATA_FILE:
+        data_file = Path(DATA_FILE)
+        if data_file.is_absolute():
+            return str(data_file)
+        base_path = Path(DATA_PATH) if DATA_PATH else (REPO_ROOT / "rag-data")
+        return str((base_path / data_file).resolve())
+    if DATASET_ID:
+        return str(preferred_dataset_records_path(DATASET_ID))
+    if DATA_SOURCE_ID:
+        return str(preferred_records_path(DATA_SOURCE_ID))
+    for dataset_id in ("all_corpus_v1", "en_core_v1", "combined"):
+        candidate = preferred_dataset_records_path(dataset_id)
+        if candidate.exists():
+            return str(candidate)
+    return str(preferred_dataset_records_path("en_core_v1"))
 
 
 def main():
@@ -45,13 +70,15 @@ def main():
     print(f"  Collection   : {COLLECTION}")
     print(f"  Embedding    : {EMBEDDING_MODEL}")
     print(f"  Remote GPU   : {REMOTE_EMBED_URL or 'OFF (local CPU)'}")
-    print(f"  Data file    : {DATA_FILE}")
+    print(f"  Dataset      : {DATASET_ID or '(auto-resolved)'}")
+    print(f"  Data source  : {DATA_SOURCE_ID or '(custom file)'}")
+    print(f"  Data file    : {DATA_FILE or '(auto-resolved)'}")
     print(f"  Chunk size   : {CHUNK_SIZE} / overlap {OVERLAP}")
+    print(f"  Quality gate : {MIN_QUALITY_STATUS}")
     print("=" * 60)
 
     # Resolve source file
-    abs_data_path = os.path.abspath(DATA_PATH)
-    source_file = os.path.join(abs_data_path, DATA_FILE)
+    source_file = _resolve_source_file()
     if not os.path.isfile(source_file):
         print(f"[ERROR] Data file not found: {source_file}")
         sys.exit(1)
@@ -61,7 +88,7 @@ def main():
     tmpdir = tempfile.mkdtemp(prefix="staging_ingest_")
     try:
         # Create a symlink (or copy on Windows) to the data file
-        tmp_file = os.path.join(tmpdir, DATA_FILE)
+        tmp_file = os.path.join(tmpdir, os.path.basename(source_file))
         try:
             os.symlink(source_file, tmp_file)
         except (OSError, NotImplementedError):
@@ -74,6 +101,7 @@ def main():
             patterns=["*.jsonl"],
             chunk_size=CHUNK_SIZE,
             overlap=OVERLAP,
+            min_quality_status=MIN_QUALITY_STATUS,
         )
         chunk_time = time.time() - t0
         print(f"  → {len(chunks)} chunks created in {chunk_time:.1f}s")

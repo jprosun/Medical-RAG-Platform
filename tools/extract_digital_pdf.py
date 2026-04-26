@@ -1,22 +1,28 @@
 """
 Extract text from all digital PDFs identified by classify_pdfs.py.
 
-For each PDF, outputs a .txt file preserving the source structure:
-  rag-data/data_processed/{source_id}/{filename}.txt
+For each PDF, outputs a .txt file preserving the canonical source structure:
+  rag-data/sources/{source_id}/processed/{filename}.txt
 
 Each .txt file includes metadata header + clean text per page.
 """
-import os
 import csv
 import json
-import time
 import re
+import sys
+import time
+from pathlib import Path
+
 import fitz  # pymupdf
 
-CATALOG = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data\corpus_catalog.csv"
-REPORT = r"d:\CODE\DATN\LLM-MedQA-Assistant\tools\pdf_classification_report.json"
-BASE_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data"
-OUT_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\rag-data\data_processed"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from services.utils.data_paths import RAG_DATA_ROOT, source_processed_dir
+
+CATALOG = RAG_DATA_ROOT / "corpus_catalog.csv"
+REPORT = REPO_ROOT / "tools" / "pdf_classification_report.json"
+BASE_DIR = RAG_DATA_ROOT
 
 # Load classification report to get set of scanned files (to skip)
 with open(REPORT, "r", encoding="utf-8") as f:
@@ -58,8 +64,6 @@ def main():
     with open(CATALOG, "r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-
     total = 0
     extracted = 0
     skipped = 0
@@ -86,8 +90,8 @@ def main():
             stats_by_source[source]["skipped"] += 1
             continue
 
-        filepath = os.path.join(BASE_DIR, rel_path)
-        if not os.path.exists(filepath):
+        filepath = BASE_DIR / rel_path
+        if not filepath.exists():
             skipped += 1
             stats_by_source[source]["skipped"] += 1
             continue
@@ -100,10 +104,10 @@ def main():
             continue
 
         # Create output path
-        basename = os.path.splitext(os.path.basename(filepath))[0]
-        out_source_dir = os.path.join(OUT_DIR, source)
-        os.makedirs(out_source_dir, exist_ok=True)
-        out_path = os.path.join(out_source_dir, f"{basename}.txt")
+        basename = filepath.stem
+        out_source_dir = source_processed_dir(source)
+        out_source_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_source_dir / f"{basename}.txt"
 
         # Build metadata header
         header = f"""---
@@ -146,7 +150,7 @@ chars: {len(text)}
     for src, s in sorted(stats_by_source.items()):
         mb = s["chars"] / 1024 / 1024
         print(f"  {src:30s} | extracted={s['extracted']:>4} skipped={s['skipped']:>3} | pages={s['pages']:>5} | {mb:.1f} MB text")
-    print(f"\nOutput directory: {OUT_DIR}")
+    print(f"\nOutput root: {RAG_DATA_ROOT / 'sources'}")
 
 
 if __name__ == "__main__":

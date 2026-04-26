@@ -9,8 +9,8 @@ date parsing, body quality, and HTML remnants.
 Corresponds to CHECK.md Section 1.
 
 Usage:
-    python -m qa_pre_ingest.check_schema ../../data/data_final/medlineplus.jsonl
-    python -m qa_pre_ingest.check_schema ../../data/data_final/*.jsonl --report report.json
+    python -m qa_pre_ingest.check_schema ../../rag-data/sources/medlineplus/records/document_records.jsonl
+    python -m qa_pre_ingest.check_schema ../../rag-data/datasets/en_core_v1/records/document_records.jsonl --report report.json
 """
 
 from __future__ import annotations

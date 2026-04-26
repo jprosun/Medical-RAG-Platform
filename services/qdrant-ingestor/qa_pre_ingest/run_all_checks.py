@@ -6,8 +6,8 @@ Runs all pre-ingest QA checks (Tang 1-3) and produces a Go/No-Go summary.
 Corresponds to CHECK.md Section 6.
 
 Usage:
-    python -m qa_pre_ingest.run_all_checks ../../data/data_final/medlineplus.jsonl
-    python -m qa_pre_ingest.run_all_checks ../../data/data_final/*.jsonl
+    python -m qa_pre_ingest.run_all_checks ../../rag-data/sources/medlineplus/records/document_records.jsonl
+    python -m qa_pre_ingest.run_all_checks ../../rag-data/datasets/en_core_v1/records/document_records.jsonl
 """
 
 from __future__ import annotations

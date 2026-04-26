@@ -21,6 +21,15 @@ from .ingest_utils import (
     Section,
 )
 from .document_schema import DocumentRecord, iter_jsonl
+from .ingest_quality import (
+    classify_section_title,
+    evaluate_document_quality,
+    infer_chunk_role,
+    passes_quality_gate,
+    reference_line_ratio,
+    should_skip_chunk,
+    table_line_ratio,
+)
 
 # Optional GCS support (kept optional to avoid hard dependency if you don't need it)
 try:
@@ -92,6 +101,12 @@ def _render_context_header(
     return ""
 
 
+def _strip_context_header(text: str) -> str:
+    if "\nBody:\n" not in text:
+        return text
+    return text.split("\nBody:\n", 1)[1]
+
+
 def chunk_by_structure(
     body: str,
     *,
@@ -101,6 +116,7 @@ def chunk_by_structure(
     audience: str = "",
     chunk_size: int = 900,
     overlap: int = 150,
+    sections: Optional[List[Section]] = None,
 ) -> List[Tuple[str, str]]:
     """
     Chunk a document body using heading structure when available.
@@ -108,7 +124,7 @@ def chunk_by_structure(
     Returns a list of (section_title_or_heading_path, chunk_text) tuples.
     Falls back to character chunking when no headings are found.
     """
-    sections = split_by_headings(body)
+    sections = sections if sections is not None else split_by_headings(body)
 
     if not sections:
         # Fallback: character-based chunking
@@ -271,6 +287,7 @@ def ingest_enriched_jsonl(
     patterns: List[str],
     chunk_size: int,
     overlap: int,
+    min_quality_status: str = "hold",
 ) -> List[Chunk]:
     """
     Ingest documents from enriched JSONL files conforming to DocumentRecord schema.
@@ -278,13 +295,16 @@ def ingest_enriched_jsonl(
     Each record is chunked using structure-aware splitting, and every chunk
     carries full metadata for downstream Qdrant filtering and citation.
     """
-    jsonl_files = list(iter_local_files(input_path, ["*.jsonl"]))
+    jsonl_patterns = [p for p in patterns if p.lower().endswith(".jsonl")] or ["*.jsonl"]
+    jsonl_files = list(iter_local_files(input_path, jsonl_patterns))
     if not jsonl_files:
         raise SystemExit(f"No .jsonl files found in {input_path}")
 
     chunks: List[Chunk] = []
     seen_ids: set = set()
     errors: List[str] = []
+    skipped_quality_records = 0
+    skipped_noise_chunks = 0
 
     for fp in jsonl_files:
         for record in iter_jsonl(fp):
@@ -294,20 +314,39 @@ def ingest_enriched_jsonl(
                 errors.append(f"{fp}: doc_id={record.doc_id!r} – {'; '.join(validation_errors)}")
                 continue
 
-            # Structure-aware chunking
+            effective_title = (record.canonical_title or record.title).strip() or record.title
+            sections = split_by_headings(record.body)
+            quality_input = record.to_dict()
+            quality_input["title"] = effective_title
+            quality_input["canonical_title"] = effective_title
+            quality_input["_section_count"] = len(sections)
+            quality = evaluate_document_quality(quality_input)
+            if not passes_quality_gate(quality, min_quality_status=min_quality_status):
+                skipped_quality_records += 1
+                continue
+
             section_chunks = chunk_by_structure(
                 record.body,
-                title=record.title,
+                title=effective_title,
                 source_name=record.source_name,
                 updated_at=record.updated_at,
                 audience=record.audience,
                 chunk_size=chunk_size,
                 overlap=overlap,
+                sections=sections,
             )
 
             for idx, (heading_path, chunk_text_content) in enumerate(section_chunks):
-                # Generate stable, human-readable ID
-                section_slug = heading_path.split(" > ")[-1] if heading_path else record.section_title
+                section_title = heading_path.split(" > ")[-1].strip() if heading_path else record.section_title.strip()
+                section_type = classify_section_title(section_title)
+                body_text = _strip_context_header(chunk_text_content)
+                if should_skip_chunk(section_type, body_text):
+                    skipped_noise_chunks += 1
+                    continue
+
+                chunk_ref_ratio = reference_line_ratio(body_text)
+                chunk_table_ratio = table_line_ratio(body_text)
+                section_slug = section_title or record.section_title or "main"
                 cid = generate_stable_id(
                     source_name=record.source_name,
                     doc_id=record.doc_id,
@@ -323,23 +362,44 @@ def ingest_enriched_jsonl(
                     counter += 1
                 seen_ids.add(cid)
 
-                # Build rich metadata (top-level keys for Qdrant filtering)
                 metadata = {
                     "doc_id": record.doc_id,
-                    "title": record.title,
-                    "section_title": record.section_title,
+                    "title": effective_title,
+                    "raw_title": record.title,
+                    "canonical_title": effective_title,
+                    "section_title": section_title,
+                    "section_type": section_type,
+                    "chunk_role": infer_chunk_role(section_type),
                     "source_name": record.source_name,
+                    "source_id": record.source_id or record.source_url or record.source_name,
                     "source_url": record.source_url,
+                    "source_file": record.source_file,
+                    "raw_path": record.raw_path,
+                    "processed_path": record.processed_path,
+                    "intermediate_path": record.intermediate_path,
+                    "parent_file": record.parent_file,
+                    "source_sha256": record.source_sha256,
+                    "crawl_run_id": record.crawl_run_id,
+                    "etl_run_id": record.etl_run_id,
                     "doc_type": record.doc_type,
                     "specialty": record.specialty,
                     "audience": record.audience,
                     "language": record.language,
+                    "language_confidence": record.language_confidence,
+                    "is_mixed_language": record.is_mixed_language,
                     "trust_tier": record.trust_tier,
                     "published_at": record.published_at,
                     "updated_at": record.updated_at,
                     "tags": record.tags,
                     "heading_path": heading_path or record.heading_path,
                     "chunk_index": idx,
+                    "quality_score": quality["quality_score"],
+                    "quality_status": quality["quality_status"],
+                    "quality_flags": quality["quality_flags"],
+                    "document_reference_line_ratio": quality["reference_line_ratio"],
+                    "document_table_line_ratio": quality["table_line_ratio"],
+                    "reference_line_ratio": chunk_ref_ratio,
+                    "table_line_ratio": chunk_table_ratio,
                 }
 
                 chunks.append(Chunk(id=cid, text=chunk_text_content, metadata=metadata))
@@ -350,6 +410,10 @@ def ingest_enriched_jsonl(
             print(f"  - {e}")
         if len(errors) > 10:
             print(f"  ... and {len(errors) - 10} more")
+    if skipped_quality_records:
+        print(f"[INFO] Skipped {skipped_quality_records} record(s) below quality gate '{min_quality_status}'.")
+    if skipped_noise_chunks:
+        print(f"[INFO] Skipped {skipped_noise_chunks} noisy/reference chunk(s).")
 
     return chunks
 
@@ -465,6 +529,12 @@ def main():
     ap.add_argument("--chunk-size", type=int, default=900)
     ap.add_argument("--overlap", type=int, default=150)
     ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument(
+        "--min-quality-status",
+        choices=["hold", "review", "go"],
+        default=os.getenv("INGEST_MIN_QUALITY_STATUS", "hold"),
+        help="Minimum document quality status allowed for enriched JSONL ingest.",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--mode",
@@ -493,6 +563,7 @@ def main():
             patterns=patterns,
             chunk_size=args.chunk_size,
             overlap=args.overlap,
+            min_quality_status=args.min_quality_status,
         )
     elif args.gcs_uri.strip():
         chunks = ingest_gcs_prefix(

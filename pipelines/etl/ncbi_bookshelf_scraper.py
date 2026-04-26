@@ -10,9 +10,9 @@ Primary sources:
   - InformedHealth.org (NBK390356) - patient-friendly explanations
 
 Usage:
-    python -m etl.ncbi_bookshelf_scraper \\
-        --raw-dir ../../data/data_raw/ncbi_bookshelf \\
-        --output  ../../data/data_final/ncbi_bookshelf.jsonl \\
+    python -m pipelines.etl.ncbi_bookshelf_scraper \\
+        --raw-dir ../../../rag-data/sources/ncbi_bookshelf/raw \\
+        --output  ../../../rag-data/sources/ncbi_bookshelf/records/document_records.jsonl \\
         --max-chapters 100
 """
 
@@ -39,8 +39,13 @@ except ImportError:
     )
     sys.exit(1)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord
+from services.utils.data_lineage import build_file_lineage, make_run_id
+from services.utils.data_paths import ensure_rag_data_layout, source_raw_dir, source_records_path
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -78,6 +83,7 @@ USER_AGENT = (
 )
 _config = {"delay": 0.5}  # mutable so main() can update
 REQUEST_TIMEOUT = 30
+SOURCE_ID = "ncbi_bookshelf"
 
 
 # ── Specialty classifier ─────────────────────────────────────────────
@@ -212,7 +218,7 @@ def fetch_chapter(chapter_id: str, raw_dir: str) -> Optional[Dict]:
                     "body": body,
                 })
 
-    from etl.html_utils import html_elem_to_text
+    from .html_utils import html_elem_to_text
 
     seen_elems = set()
     for elem in content.find_all(["h2", "h3", "p", "ul", "ol", "li"]):
@@ -254,21 +260,25 @@ def fetch_chapter(chapter_id: str, raw_dir: str) -> Optional[Dict]:
                 "body": all_text[:5000],  # Cap at 5000 chars for safety
             })
 
-    return {"title": title, "chapter_id": chapter_id, "sections": sections}
+    return {"title": title, "chapter_id": chapter_id, "raw_path": cache_path, "sections": sections}
 
 
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="NCBI Bookshelf -> enriched JSONL")
-    ap.add_argument("--raw-dir", required=True, help="Dir to save raw HTML")
-    ap.add_argument("--output", required=True, help="Output JSONL path")
+    ap.add_argument("--raw-dir", default="", help="Dir to save raw HTML (defaults to rag-data canonical layout)")
+    ap.add_argument("--output", default="", help="Output JSONL path (defaults to rag-data canonical layout)")
     ap.add_argument("--max-chapters", type=int, default=100, help="Max chapters total")
     ap.add_argument("--delay", type=float, default=_config["delay"])
     args = ap.parse_args()
 
     _config["delay"] = args.delay
+    ensure_rag_data_layout([SOURCE_ID])
+    raw_dir = str(Path(args.raw_dir)) if args.raw_dir else str(source_raw_dir(SOURCE_ID))
+    output_path = str(Path(args.output)) if args.output else str(source_records_path(SOURCE_ID))
 
-    os.makedirs(args.raw_dir, exist_ok=True)
+    os.makedirs(raw_dir, exist_ok=True)
+    etl_run_id = os.getenv("ETL_RUN_ID") or make_run_id("scrape", SOURCE_ID)
 
     # Search for chapters on each medical topic
     all_chapter_ids: List[str] = []
@@ -293,11 +303,12 @@ def main():
     
     for i, chapter_id in enumerate(all_chapter_ids):
         print(f"  [{i+1}/{len(all_chapter_ids)}] Fetching {chapter_id}...")
-        result = fetch_chapter(chapter_id, args.raw_dir)
+        result = fetch_chapter(chapter_id, raw_dir)
         if not result:
             continue
 
         title = result["title"]
+        lineage = build_file_lineage(result["raw_path"], source_id=SOURCE_ID, etl_run_id=etl_run_id)
         for sec_idx, sec in enumerate(result["sections"]):
             body = sec["body"].strip()
             # Deduplicate exact section body texts across chapters
@@ -320,6 +331,7 @@ def main():
                 body=body,
                 source_name="NCBI Bookshelf",
                 source_url=f"{NCBI_BOOKSHELF_BASE}/{chapter_id}/",
+                **lineage,
                 doc_type="textbook",
                 specialty=specialty,
                 audience="student",
@@ -330,12 +342,12 @@ def main():
             ))
 
     # Write JSONL
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as fh:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
         for rec in all_records:
             fh.write(rec.to_jsonl_line() + "\n")
 
-    print(f"\n[DONE] Wrote {len(all_records)} records to {args.output}")
+    print(f"\n[DONE] Wrote {len(all_records)} records to {output_path}")
 
 
 if __name__ == "__main__":

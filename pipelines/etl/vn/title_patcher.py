@@ -17,7 +17,7 @@ import json, re, os, sys, unicodedata
 from collections import Counter
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[3]
 INPUT = _ROOT / "data" / "data_final" / "vmj_ojs.jsonl"
 OUTPUT = _ROOT / "data" / "data_final" / "vmj_ojs_patched.jsonl"
 REPORT = _ROOT / "benchmark" / "reports" / "vmj" / "title_patch_report.json"

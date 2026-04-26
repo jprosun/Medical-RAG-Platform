@@ -31,9 +31,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, os.path.abspath("."))
 
-from etl.universal_loader import universal_load, save_jsonl
+from pipelines.etl.universal_loader import universal_load, save_jsonl
 from qa_pre_ingest.run_all_checks import run_all, compute_composite_score
 
 

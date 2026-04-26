@@ -5,18 +5,18 @@ ETL: Master Normalize Script
 Orchestrates the full ETL pipeline:
 1. Runs all scrapers (or skips if data_raw already populated)
 2. Validates all enriched JSONL outputs
-3. Merges into a single combined.jsonl
+3. Merges into a canonical dataset release
 4. Prints statistics
 
 Usage:
-    python -m etl.normalize_all \\
-        --data-dir ../../data \\
+    python -m pipelines.etl.normalize_all \\
+        --dataset-id en_core_v1 \\
         --max-medlineplus 200 \\
         --max-who 50 \\
         --max-ncbi 100
 
     # Skip scraping (just validate + merge existing data):
-    python -m etl.normalize_all --data-dir ../../data --skip-scrape
+    python -m pipelines.etl.normalize_all --dataset-id en_core_v1 --skip-scrape
 """
 
 from __future__ import annotations
@@ -26,11 +26,32 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord, iter_jsonl
+from services.utils.data_lineage import make_run_id
+from services.utils.data_paths import (
+    dataset_manifest_path,
+    dataset_qa_dir,
+    dataset_records_path,
+    ensure_rag_data_layout,
+    source_raw_dir,
+    source_records_path,
+)
+
+
+EN_SOURCE_IDS = ("medlineplus", "who", "ncbi_bookshelf")
 
 
 def run_scraper(cmd: List[str], name: str) -> bool:
@@ -45,7 +66,7 @@ def run_scraper(cmd: List[str], name: str) -> bool:
             cmd,
             capture_output=False,
             text=True,
-            cwd=str(Path(__file__).resolve().parents[1]),
+            cwd=str(REPO_ROOT),
         )
         if result.returncode != 0:
             print(f"\n[WARN] {name} exited with code {result.returncode}")
@@ -127,6 +148,13 @@ def dedup_within_source(records: List) -> List:
     return list(by_hash.values())
 
 
+def _source_label_for_path(path: str) -> str:
+    fp = Path(path)
+    if fp.name == "document_records.jsonl" and fp.parent.name == "records":
+        return fp.parent.parent.name
+    return fp.stem
+
+
 def merge_jsonl(input_files: List[str], output_path: str) -> int:
     """
     Merge multiple JSONL files with smart dedup strategy:
@@ -146,10 +174,10 @@ def merge_jsonl(input_files: List[str], output_path: str) -> int:
             continue
         
         source_records = list(iter_jsonl(fp))
-        source_name = os.path.basename(fp)
         original_count = len(source_records)
         
         deduped = dedup_within_source(source_records)
+        source_name = deduped[0].source_name if deduped else _source_label_for_path(fp)
         
         per_source_stats[source_name] = {
             "original": original_count,
@@ -198,8 +226,7 @@ def merge_jsonl(input_files: List[str], output_path: str) -> int:
     total = len(final_records)
     print(f"  Records per source:")
     for src, cnt in sorted(source_counts.items()):
-        orig_file = [s for s in per_source_stats if src.lower().replace(" ", "") in s.lower().replace("_", "")]
-        orig_cnt = per_source_stats.get(orig_file[0], {}).get("original", "?") if orig_file else "?"
+        orig_cnt = per_source_stats.get(src, {}).get("original", "?")
         print(f"    {src:25s} {cnt:5d} records (from {orig_cnt})")
     
     print(f"\n  Within-source dedup:")
@@ -233,22 +260,98 @@ def merge_jsonl(input_files: List[str], output_path: str) -> int:
     return total
 
 
+def _legacy_dataset_output_path(dataset_id: str, legacy_data_dir: Path) -> Path:
+    filename = "combined.jsonl" if dataset_id in {"combined", "en_core", "en_core_v1"} else f"{dataset_id}.jsonl"
+    return legacy_data_dir / "data_final" / filename
+
+
+def _resolve_source_paths(source_id: str, legacy_data_dir: Path | None) -> tuple[Path, Path]:
+    if legacy_data_dir:
+        raw_dir = legacy_data_dir / "data_raw" / source_id
+        output_path = legacy_data_dir / "data_final" / f"{source_id}.jsonl"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return raw_dir, output_path
+    return source_raw_dir(source_id), source_records_path(source_id)
+
+
+def _write_dataset_metadata(
+    dataset_id: str,
+    output_path: Path,
+    source_outputs: dict[str, Path],
+    validation_stats: list[Dict],
+    total: int,
+    etl_run_id: str,
+) -> None:
+    qa_dir = dataset_qa_dir(dataset_id)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+
+    validation_summary = {
+        "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "dataset_id": dataset_id,
+        "etl_run_id": etl_run_id,
+        "output_path": str(output_path),
+        "sources": {source_id: str(path) for source_id, path in source_outputs.items()},
+        "record_count": total,
+        "validation": validation_stats,
+    }
+    validation_path = qa_dir / "validation_summary.json"
+    with open(validation_path, "w", encoding="utf-8") as fh:
+        json.dump(validation_summary, fh, ensure_ascii=False, indent=2)
+
+    manifest = {
+        "kind": "dataset_release",
+        "dataset_id": dataset_id,
+        "etl_run_id": etl_run_id,
+        "generated_at_utc": validation_summary["generated_at_utc"],
+        "records_path": str(output_path),
+        "qa_summary_path": str(validation_path),
+        "source_ids": list(source_outputs.keys()),
+        "record_count": total,
+    }
+    manifest_path = dataset_manifest_path(dataset_id)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Master ETL: scrape + validate + merge")
-    ap.add_argument("--data-dir", required=True, help="Root data dir (e.g., ../../data)")
+    ap.add_argument(
+        "--dataset-id",
+        default="en_core_v1",
+        help="Canonical dataset ID for the merged release under rag-data/datasets/",
+    )
+    ap.add_argument(
+        "--data-dir",
+        default="",
+        help="Deprecated legacy root (e.g., ../../data). New runs should omit this and use rag-data/.",
+    )
     ap.add_argument("--max-medlineplus", type=int, default=200)
     ap.add_argument("--max-who", type=int, default=50)
     ap.add_argument("--max-ncbi", type=int, default=100)
     ap.add_argument("--skip-scrape", action="store_true", help="Skip scraping, just validate + merge")
     args = ap.parse_args()
 
-    data_dir = os.path.abspath(args.data_dir)
-    raw_dir = os.path.join(data_dir, "data_raw")
-    final_dir = os.path.join(data_dir, "data_final")
-    os.makedirs(raw_dir, exist_ok=True)
-    os.makedirs(final_dir, exist_ok=True)
+    legacy_data_dir = Path(args.data_dir).resolve() if args.data_dir else None
+    etl_run_id = os.getenv("ETL_RUN_ID") or make_run_id("normalize_all", args.dataset_id)
+    os.environ["ETL_RUN_ID"] = etl_run_id
+    if legacy_data_dir:
+        print("[WARN] --data-dir uses the legacy layout. Canonical output is rag-data/.")
+    else:
+        ensure_rag_data_layout(source_ids=EN_SOURCE_IDS, dataset_ids=[args.dataset_id])
 
-    etl_dir = str(Path(__file__).resolve().parents[1])
+    source_paths = {
+        source_id: _resolve_source_paths(source_id, legacy_data_dir)
+        for source_id in EN_SOURCE_IDS
+    }
+    source_outputs = {source_id: output_path for source_id, (_, output_path) in source_paths.items()}
+    dataset_output = (
+        _legacy_dataset_output_path(args.dataset_id, legacy_data_dir)
+        if legacy_data_dir
+        else dataset_records_path(args.dataset_id)
+    )
+
     python = sys.executable
 
     # ── Step 1: Run scrapers ──────────────────────────────────────────
@@ -257,27 +360,27 @@ def main():
             {
                 "name": "MedlinePlus",
                 "cmd": [
-                    python, "-m", "etl.medlineplus_scraper",
-                    "--raw-dir", os.path.join(raw_dir, "medlineplus"),
-                    "--output", os.path.join(final_dir, "medlineplus.jsonl"),
+                    python, "-m", "pipelines.etl.medlineplus_scraper",
+                    "--raw-dir", str(source_paths["medlineplus"][0]),
+                    "--output", str(source_outputs["medlineplus"]),
                     "--max-topics", str(args.max_medlineplus),
                 ],
             },
             {
                 "name": "WHO",
                 "cmd": [
-                    python, "-m", "etl.who_scraper",
-                    "--raw-dir", os.path.join(raw_dir, "who"),
-                    "--output", os.path.join(final_dir, "who.jsonl"),
+                    python, "-m", "pipelines.etl.who_scraper",
+                    "--raw-dir", str(source_paths["who"][0]),
+                    "--output", str(source_outputs["who"]),
                     "--max-topics", str(args.max_who),
                 ],
             },
             {
                 "name": "NCBI Bookshelf",
                 "cmd": [
-                    python, "-m", "etl.ncbi_bookshelf_scraper",
-                    "--raw-dir", os.path.join(raw_dir, "ncbi_bookshelf"),
-                    "--output", os.path.join(final_dir, "ncbi_bookshelf.jsonl"),
+                    python, "-m", "pipelines.etl.ncbi_bookshelf_scraper",
+                    "--raw-dir", str(source_paths["ncbi_bookshelf"][0]),
+                    "--output", str(source_outputs["ncbi_bookshelf"]),
                     "--max-chapters", str(args.max_ncbi),
                 ],
             },
@@ -291,11 +394,7 @@ def main():
     print("  VALIDATION RESULTS")
     print(f"{'='*60}\n")
 
-    jsonl_files = [
-        os.path.join(final_dir, "medlineplus.jsonl"),
-        os.path.join(final_dir, "who.jsonl"),
-        os.path.join(final_dir, "ncbi_bookshelf.jsonl"),
-    ]
+    jsonl_files = [str(path) for path in source_outputs.values()]
 
     all_stats = []
     for fp in jsonl_files:
@@ -309,16 +408,25 @@ def main():
         else:
             print(f"  {name}: [WARN] {stats['valid']} valid, {stats['errors']} errors")
 
-    # ── Step 3: Merge into combined.jsonl ─────────────────────────────
+    # ── Step 3: Merge into dataset release ────────────────────────────
     existing_files = [fp for fp in jsonl_files if os.path.exists(fp)]
-    combined_path = os.path.join(final_dir, "combined.jsonl")
-    total = merge_jsonl(existing_files, combined_path)
+    total = merge_jsonl(existing_files, str(dataset_output))
 
     print(f"\n{'='*60}")
     print("  MERGE RESULTS")
     print(f"{'='*60}")
-    print(f"  Combined:  {total} unique records")
-    print(f"  Output:    {combined_path}")
+    print(f"  Records:   {total} unique records")
+    print(f"  Output:    {dataset_output}")
+
+    if not legacy_data_dir:
+        _write_dataset_metadata(
+            dataset_id=args.dataset_id,
+            output_path=dataset_output,
+            source_outputs=source_outputs,
+            validation_stats=all_stats,
+            total=total,
+            etl_run_id=etl_run_id,
+        )
 
     # ── Step 4: Statistics ────────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -346,7 +454,10 @@ def main():
             name = tier_names.get(tier, f"Tier {tier}")
             print(f"    Tier {tier} - {name:30s} {total_tiers[tier]:5d}")
 
-    print(f"\n[DONE] Pipeline complete. Output in: {final_dir}/")
+    if legacy_data_dir:
+        print(f"\n[DONE] Pipeline complete. Output in legacy dir: {legacy_data_dir / 'data_final'}")
+    else:
+        print(f"\n[DONE] Pipeline complete. Dataset release: {dataset_output}")
 
 
 if __name__ == "__main__":

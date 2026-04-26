@@ -15,17 +15,17 @@ Usage:
     cd services/qdrant-ingestor
 
     # From CSV
-    python -m etl.universal_loader --input data.csv --source-name "Custom DB" --output out.jsonl
+    python -m pipelines.etl.universal_loader --input data.csv --source-name "Custom DB" --output out.jsonl
 
     # From TXT directory
-    python -m etl.universal_loader --input ./txt_files/ --source-name "Notes" --output out.jsonl
+    python -m pipelines.etl.universal_loader --input ./txt_files/ --source-name "Notes" --output out.jsonl
 
     # From Markdown
-    python -m etl.universal_loader --input guide.md --source-name "Manual" --output out.jsonl
+    python -m pipelines.etl.universal_loader --input guide.md --source-name "Manual" --output out.jsonl
 
     # From JSONL (re-validate + normalize)
     
-    python -m etl.universal_loader --input raw.jsonl --output out.jsonl
+    python -m pipelines.etl.universal_loader --input raw.jsonl --output out.jsonl
 """
 
 from __future__ import annotations
@@ -40,7 +40,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord, VALID_DOC_TYPES, VALID_AUDIENCES
 
 
@@ -374,4 +377,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -7,8 +7,8 @@ Detects duplicate documents within a JSONL file using:
   3. Title similarity (Levenshtein ratio > 0.85)
 
 Usage:
-    python -m etl.vn.vn_dedup --input data.jsonl --report
-    python -m etl.vn.vn_dedup --input data.jsonl --output deduped.jsonl
+    python -m pipelines.etl.vn.vn_dedup --input data.jsonl --report
+    python -m pipelines.etl.vn.vn_dedup --input data.jsonl --output deduped.jsonl
 """
 
 from __future__ import annotations

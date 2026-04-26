@@ -12,7 +12,7 @@ Infers missing metadata fields for Vietnamese medical documents:
 from __future__ import annotations
 
 import re
-from etl.vn.vn_specialty_dict import detect_specialty
+from .vn_specialty_dict import detect_specialty
 
 
 # ---------- Source-based defaults ----------

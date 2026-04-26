@@ -9,9 +9,9 @@ MedlinePlus publishes daily XML dumps (public domain, NLM/NIH):
   https://medlineplus.gov/xml/mplus_topics_2025-03-10.xml
 
 Usage:
-    python -m etl.medlineplus_scraper \\
-        --raw-dir ../../data/data_raw/medlineplus \\
-        --output  ../../data/data_final/medlineplus.jsonl
+    python -m pipelines.etl.medlineplus_scraper \\
+        --raw-dir ../../../rag-data/sources/medlineplus/raw \\
+        --output  ../../../rag-data/sources/medlineplus/records/document_records.jsonl
 """
 
 from __future__ import annotations
@@ -37,9 +37,14 @@ except ImportError:
     )
     sys.exit(1)
 
-# Add parent to path so we can import from app
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Add parent paths so we can import from app + shared path helpers
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord
+from services.utils.data_lineage import build_file_lineage, make_run_id
+from services.utils.data_paths import ensure_rag_data_layout, source_raw_dir, source_records_path
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -50,6 +55,7 @@ USER_AGENT = (
     "https://github.com/lehuyphuong/LLM-MedQA-Assistant)"
 )
 REQUEST_TIMEOUT = 60
+SOURCE_ID = "medlineplus"
 
 
 # ── Specialty classifier ─────────────────────────────────────────────
@@ -131,7 +137,7 @@ def _clean_html(html_text: str) -> str:
     """Strip HTML tags and clean whitespace, preserving list formatting."""
     if not html_text:
         return ""
-    from etl.html_utils import clean_html_preserve_lists
+    from .html_utils import clean_html_preserve_lists
     return clean_html_preserve_lists(html_text)
 
 
@@ -145,9 +151,10 @@ def _extract_tags_from_groups(topic_elem) -> List[str]:
     return tags
 
 
-def parse_xml_to_records(xml_path: str, max_topics: int = 0) -> List[DocumentRecord]:
+def parse_xml_to_records(xml_path: str, max_topics: int = 0, etl_run_id: str = "") -> List[DocumentRecord]:
     """Parse MedlinePlus XML into DocumentRecord objects."""
     print(f"[INFO] Parsing XML: {xml_path}")
+    lineage = build_file_lineage(xml_path, source_id=SOURCE_ID, etl_run_id=etl_run_id)
 
     with open(xml_path, "r", encoding="utf-8") as f:
         soup = BeautifulSoup(f, "lxml-xml")
@@ -199,6 +206,7 @@ def parse_xml_to_records(xml_path: str, max_topics: int = 0) -> List[DocumentRec
             body=full_summary,
             source_name="MedlinePlus",
             source_url=url,
+            **lineage,
             doc_type="patient_education",
             specialty=specialty,
             audience="patient",
@@ -219,30 +227,35 @@ def parse_xml_to_records(xml_path: str, max_topics: int = 0) -> List[DocumentRec
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="MedlinePlus XML → enriched JSONL")
-    ap.add_argument("--raw-dir", required=True, help="Dir to save raw XML (data/data_raw/medlineplus)")
-    ap.add_argument("--output", required=True, help="Output JSONL path (data/data_final/medlineplus.jsonl)")
+    ap.add_argument("--raw-dir", default="", help="Dir to save raw XML (defaults to rag-data canonical layout)")
+    ap.add_argument("--output", default="", help="Output JSONL path (defaults to rag-data canonical layout)")
     ap.add_argument("--max-topics", type=int, default=0, help="Limit topics (0 = all)")
     ap.add_argument("--skip-download", action="store_true", help="Skip download, use existing XML")
     args = ap.parse_args()
 
+    ensure_rag_data_layout([SOURCE_ID])
+    raw_dir = str(Path(args.raw_dir)) if args.raw_dir else str(source_raw_dir(SOURCE_ID))
+    output_path = str(Path(args.output)) if args.output else str(source_records_path(SOURCE_ID))
+
     # Download
     if not args.skip_download:
-        xml_path = download_xml(args.raw_dir)
+        xml_path = download_xml(raw_dir)
     else:
-        xml_path = os.path.join(args.raw_dir, "mplus_topics.xml")
+        xml_path = os.path.join(raw_dir, "mplus_topics.xml")
         if not os.path.exists(xml_path):
             raise SystemExit(f"[ERROR] XML not found: {xml_path}")
 
     # Parse
-    records = parse_xml_to_records(xml_path, max_topics=args.max_topics)
+    etl_run_id = os.getenv("ETL_RUN_ID") or make_run_id("scrape", SOURCE_ID)
+    records = parse_xml_to_records(xml_path, max_topics=args.max_topics, etl_run_id=etl_run_id)
 
     # Write JSONL
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as fh:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
         for rec in records:
             fh.write(rec.to_jsonl_line() + "\n")
 
-    print(f"[DONE] Wrote {len(records)} records to {args.output}")
+    print(f"[DONE] Wrote {len(records)} records to {output_path}")
 
 
 if __name__ == "__main__":

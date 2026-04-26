@@ -13,8 +13,8 @@ Checks content quality BEFORE chunking:
 Corresponds to CHECK.md Section 2.
 
 Usage:
-    python -m qa_pre_ingest.check_content ../../data/data_final/medlineplus.jsonl
-    python -m qa_pre_ingest.check_content ../../data/data_final/*.jsonl --sample 50
+    python -m qa_pre_ingest.check_content ../../rag-data/sources/medlineplus/records/document_records.jsonl
+    python -m qa_pre_ingest.check_content ../../rag-data/datasets/en_core_v1/records/document_records.jsonl --sample 50
 """
 
 from __future__ import annotations

@@ -76,22 +76,48 @@ services:
     environment:
       QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
       EMBEDDING_MODEL: BAAI/bge-m3
+      RAG_DATA_ROOT: /rag-data
+      DATASET_ID: vmj_ojs_release_v2
       OTEL_SDK_DISABLED: "true"
     command:
       - --qdrant-url
       - http://qdrant:6333
       - --top-level-path
-      - /data
+      - /rag-data
       - --input-path
-      - .
+      - datasets/vmj_ojs_release_v2/records
       - --patterns
-      - "*.txt,*.md,*.jsonl"
+      - document_records.jsonl
+      - --mode
+      - enriched
     volumes:
-      - ./services/qdrant-ingestor/data:/data:ro
+      - ./rag-data:/rag-data:ro
     depends_on:
       - qdrant
     profiles:
       - ingest
+
+  qdrant-precomputed-ingestor:
+    build:
+      context: .
+      dockerfile: services/qdrant-ingestor/Dockerfile
+    entrypoint:
+      - python
+      - services/qdrant-ingestor/ingest_kaggle_precomputed.py
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
+      RAG_DATA_ROOT: /rag-data
+      EMBED_DATASET_ID: vmj_ojs_release_v2
+      KAGGLE_PROFILE: multilingual
+      QDRANT_RECREATE_COLLECTION: "false"
+      OTEL_SDK_DISABLED: "true"
+    volumes:
+      - ./rag-data:/rag-data:ro
+    depends_on:
+      - qdrant
+    profiles:
+      - precomputed-ingest
 
 volumes:
   qdrant_storage:

@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import importlib
+import json
+import sys
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+if str(INGESTOR_ROOT) not in sys.path:
+    sys.path.insert(0, str(INGESTOR_ROOT))
+
+
+def _reload_builder(monkeypatch, rag_root: Path):
+    monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
+    data_paths = importlib.import_module("services.utils.data_paths")
+    importlib.reload(data_paths)
+    builder = importlib.import_module("tools.build_dataset_release")
+    return importlib.reload(builder)
+
+
+def _record(doc_id: str, source_id: str) -> dict:
+    return {
+        "doc_id": doc_id,
+        "title": f"Title {doc_id}",
+        "body": f"Body {doc_id}",
+        "source_name": source_id,
+        "source_id": source_id,
+    }
+
+
+def test_build_dataset_release_concatenates_sources_and_writes_manifest(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    source_a = rag_root / "sources" / "medlineplus" / "records" / "document_records.jsonl"
+    source_b = rag_root / "sources" / "who" / "records" / "document_records.jsonl"
+    source_a.parent.mkdir(parents=True)
+    source_b.parent.mkdir(parents=True)
+    source_a.write_text(json.dumps(_record("a", "medlineplus")) + "\n", encoding="utf-8")
+    source_b.write_text(json.dumps(_record("b", "who")) + "\n", encoding="utf-8")
+
+    builder = _reload_builder(monkeypatch, rag_root)
+
+    report = builder.build_dataset_release(
+        dataset_id="en_core_v1",
+        source_ids=("medlineplus", "who"),
+    )
+
+    output = rag_root / "datasets" / "en_core_v1" / "records" / "document_records.jsonl"
+    manifest = rag_root / "datasets" / "en_core_v1" / "manifest.json"
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+    assert report["record_count"] == 2
+    assert [row["doc_id"] for row in rows] == ["a", "b"]
+    assert manifest.exists()
+
+
+def test_build_dataset_release_dedups_by_source_doc_id(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    source = rag_root / "sources" / "medlineplus" / "records" / "document_records.jsonl"
+    source.parent.mkdir(parents=True)
+    records = [
+        _record("same", "medlineplus"),
+        _record("same", "medlineplus"),
+    ]
+    source.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+
+    builder = _reload_builder(monkeypatch, rag_root)
+
+    report = builder.build_dataset_release(
+        dataset_id="en_core_v1",
+        source_ids=("medlineplus",),
+    )
+
+    assert report["record_count"] == 1
+    assert report["duplicates_skipped"] == 1

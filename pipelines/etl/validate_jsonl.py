@@ -5,8 +5,8 @@ JSONL Schema Validator
 Validates enriched JSONL files against the DocumentRecord schema.
 
 Usage:
-    python -m etl.validate_jsonl data/sample_enriched.jsonl
-    python -m etl.validate_jsonl data/*.jsonl --strict
+    python -m pipelines.etl.validate_jsonl data/sample_enriched.jsonl
+    python -m pipelines.etl.validate_jsonl data/*.jsonl --strict
 """
 
 from __future__ import annotations
@@ -16,8 +16,11 @@ import json
 import sys
 from pathlib import Path
 
-# Add parent to path so we can import from app
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Add parent paths so we can import from app
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord
 
 

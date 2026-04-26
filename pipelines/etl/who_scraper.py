@@ -9,9 +9,9 @@ WHO publishes health topic fact sheets at:
   https://www.who.int/news-room/fact-sheets
 
 Usage:
-    python -m etl.who_scraper \\
-        --raw-dir ../../data/data_raw/who \\
-        --output  ../../data/data_final/who.jsonl \\
+    python -m pipelines.etl.who_scraper \\
+        --raw-dir ../../../rag-data/sources/who/raw \\
+        --output  ../../../rag-data/sources/who/records/document_records.jsonl \\
         --max-topics 50
 """
 
@@ -37,8 +37,13 @@ except ImportError:
     )
     sys.exit(1)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 from app.document_schema import DocumentRecord
+from services.utils.data_lineage import build_file_lineage, make_run_id
+from services.utils.data_paths import ensure_rag_data_layout, source_raw_dir, source_records_path
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -50,6 +55,7 @@ USER_AGENT = (
 )
 _config = {"delay": 2.0}  # mutable so main() can update
 REQUEST_TIMEOUT = 30
+SOURCE_ID = "who"
 
 
 # ── Specialty classifier (same as MedlinePlus) ──────────────────────
@@ -154,7 +160,7 @@ def discover_fact_sheets(max_topics: int = 0) -> List[Dict[str, str]]:
 
 
 # ── Scrape individual fact sheet ─────────────────────────────────────
-def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord]:
+def scrape_fact_sheet(url: str, title: str, raw_dir: str, etl_run_id: str = "") -> List[DocumentRecord]:
     """Scrape a single WHO fact sheet page."""
     html = _get(url)
     if not html:
@@ -165,6 +171,7 @@ def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord
     raw_path = os.path.join(raw_dir, f"{slug}.html")
     with open(raw_path, "w", encoding="utf-8") as f:
         f.write(html)
+    lineage = build_file_lineage(raw_path, source_id=SOURCE_ID, etl_run_id=etl_run_id)
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -201,6 +208,7 @@ def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord
             body=body,
             source_name="WHO",
             source_url=url,
+            **lineage,
             doc_type="guideline",
             specialty=specialty,
             audience="clinician",
@@ -212,7 +220,7 @@ def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord
             heading_path=f"{title} > {current_section}",
         ))
 
-    from etl.html_utils import html_elem_to_text
+    from .html_utils import html_elem_to_text
 
     seen_li_ids = set()
     for elem in content.descendants:
@@ -258,6 +266,7 @@ def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord
                 body=all_text,
                 source_name="WHO",
                 source_url=url,
+                **lineage,
                 doc_type="guideline",
                 specialty=specialty,
                 audience="clinician",
@@ -273,15 +282,19 @@ def scrape_fact_sheet(url: str, title: str, raw_dir: str) -> List[DocumentRecord
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="WHO fact sheets -> enriched JSONL")
-    ap.add_argument("--raw-dir", required=True, help="Dir to save raw HTML")
-    ap.add_argument("--output", required=True, help="Output JSONL path")
+    ap.add_argument("--raw-dir", default="", help="Dir to save raw HTML (defaults to rag-data canonical layout)")
+    ap.add_argument("--output", default="", help="Output JSONL path (defaults to rag-data canonical layout)")
     ap.add_argument("--max-topics", type=int, default=0, help="Limit topics (0 = all)")
     ap.add_argument("--delay", type=float, default=_config["delay"])
     args = ap.parse_args()
 
     _config["delay"] = args.delay
+    ensure_rag_data_layout([SOURCE_ID])
+    raw_dir = str(Path(args.raw_dir)) if args.raw_dir else str(source_raw_dir(SOURCE_ID))
+    output_path = str(Path(args.output)) if args.output else str(source_records_path(SOURCE_ID))
 
-    os.makedirs(args.raw_dir, exist_ok=True)
+    os.makedirs(raw_dir, exist_ok=True)
+    etl_run_id = os.getenv("ETL_RUN_ID") or make_run_id("scrape", SOURCE_ID)
 
     # Discover
     topics = discover_fact_sheets(max_topics=args.max_topics)
@@ -290,17 +303,17 @@ def main():
     all_records: List[DocumentRecord] = []
     for i, topic in enumerate(topics):
         print(f"  [{i+1}/{len(topics)}] {topic['title']}...")
-        records = scrape_fact_sheet(topic["url"], topic["title"], args.raw_dir)
+        records = scrape_fact_sheet(topic["url"], topic["title"], raw_dir, etl_run_id=etl_run_id)
         all_records.extend(records)
         time.sleep(_config["delay"])
 
     # Write JSONL
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as fh:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
         for rec in all_records:
             fh.write(rec.to_jsonl_line() + "\n")
 
-    print(f"\n[DONE] Wrote {len(all_records)} records to {args.output}")
+    print(f"\n[DONE] Wrote {len(all_records)} records to {output_path}")
 
 
 if __name__ == "__main__":

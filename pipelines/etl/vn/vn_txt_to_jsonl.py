@@ -11,9 +11,8 @@ Master converter that orchestrates the full pipeline:
   7. Emit DocumentRecord JSONL
 
 Usage:
-    python -m etl.vn.vn_txt_to_jsonl \\
-        --source-dir ../../rag-data/data_processed/vmj_ojs \\
-        --output ../../data/data_final/vmj_ojs.jsonl \\
+    python -m pipelines.etl.vn.vn_txt_to_jsonl \\
+        --source-id vmj_ojs \\
         [--max-files N] [--dry-run] [--verbose]
 """
 
@@ -29,15 +28,42 @@ import sys
 from pathlib import Path
 
 # Add parent dirs to path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+INGESTOR_ROOT = REPO_ROOT / "services" / "qdrant-ingestor"
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(INGESTOR_ROOT))
 
-from etl.vn import vn_text_cleaner
-from etl.vn import vn_title_extractor
-from etl.vn import vn_metadata_enricher
-from etl.vn import vn_sectionizer
-from etl.vn import vn_quality_scorer
+from . import vn_text_cleaner
+from . import vn_title_extractor
+from . import vn_metadata_enricher
+from . import vn_sectionizer
+from . import vn_quality_scorer
+from services.utils.data_lineage import build_file_lineage, make_run_id
+from services.utils.data_paths import preferred_processed_dir, source_records_path
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_source_dir(source_id: str | None, source_dir: str | None) -> Path:
+    if source_dir:
+        return Path(source_dir)
+    if not source_id:
+        raise ValueError("source_id is required when --source-dir is omitted")
+    return preferred_processed_dir(source_id)
+
+
+def _resolve_output_path(source_id: str | None, output_path: str | None) -> Path:
+    if output_path:
+        return Path(output_path)
+    if not source_id:
+        raise ValueError("source_id is required when --output is omitted")
+    return source_records_path(source_id)
+
+
+def _infer_source_id_from_dir(source_dir: Path) -> str:
+    if source_dir.name in {"raw", "processed", "intermediate", "records", "qa"}:
+        return source_dir.parent.name
+    return source_dir.name
 
 
 # ---------- YAML frontmatter parser ----------
@@ -87,7 +113,7 @@ def _make_doc_id(source_id: str, filepath: str, section_idx: int) -> str:
 
 # ---------- Main Processing ----------
 
-def process_file(filepath: str, source_id: str | None = None) -> list[dict]:
+def process_file(filepath: str, source_id: str | None = None, etl_run_id: str = "") -> list[dict]:
     """Process a single TXT file into DocumentRecord dicts.
 
     v3: Source-aware sectionization replaces old KCB procedure splitter.
@@ -106,6 +132,12 @@ def process_file(filepath: str, source_id: str | None = None) -> list[dict]:
     # 1. Parse frontmatter
     meta, body = _parse_frontmatter(raw_text)
     src_id = source_id or meta.get("source_id", "unknown")
+    lineage = build_file_lineage(
+        filepath,
+        source_id=src_id,
+        etl_run_id=etl_run_id,
+        parent_file=meta.get("parent_file", meta.get("issue_file", "")),
+    )
 
     # 2. Clean text
     cleaned_body = vn_text_cleaner.clean(body)
@@ -156,6 +188,8 @@ def process_file(filepath: str, source_id: str | None = None) -> list[dict]:
             "source_name": enriched["source_name"],
             "section_title": section.section_title,
             "source_url": meta.get("source_url", meta.get("file_url", "")),
+            "source_id": src_id,
+            **lineage,
             "doc_type": enriched["doc_type"],
             "specialty": enriched["specialty"],
             "audience": enriched["audience"],
@@ -219,6 +253,7 @@ def process_directory(
     # Infer source_id from directory name if not provided
     if not source_id:
         source_id = source_dir.name
+    etl_run_id = os.getenv("ETL_RUN_ID") or make_run_id("vn_txt_to_jsonl", source_id)
 
     total_files = len(txt_files)
     total_records = 0
@@ -233,7 +268,7 @@ def process_directory(
             print(f"  [{i+1}/{total_files}] {fpath.name}")
 
         try:
-            records = process_file(str(fpath), source_id=source_id)
+            records = process_file(str(fpath), source_id=source_id, etl_run_id=etl_run_id)
         except Exception as e:
             logger.error(f"ERROR processing {fpath}: {e}")
             total_skipped += 1
@@ -269,6 +304,7 @@ def process_directory(
         "avg_quality_score": round(avg_score, 1),
         "status_counts": status_counts,
         "output": str(output_path) if not dry_run else "(dry-run)",
+        "etl_run_id": etl_run_id,
     }
 
     return summary
@@ -278,8 +314,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="Convert Vietnamese medical TXT files to DocumentRecord JSONL"
     )
-    ap.add_argument("--source-dir", required=True, help="Directory with .txt files")
-    ap.add_argument("--output", required=True, help="Output JSONL file path")
+    ap.add_argument("--source-dir", required=False, help="Directory with .txt files")
+    ap.add_argument("--output", required=False, help="Output JSONL file path")
     ap.add_argument("--source-id", required=False, help="Override source ID (default: infer from dir name)")
     ap.add_argument("--max-files", type=int, help="Max files to process (pilot mode)")
     ap.add_argument("--dry-run", action="store_true", help="Don't write output")
@@ -291,18 +327,22 @@ def main():
         format="%(levelname)s: %(message)s",
     )
 
+    resolved_source_dir = _resolve_source_dir(args.source_id, args.source_dir)
+    inferred_source_id = args.source_id or _infer_source_id_from_dir(resolved_source_dir)
+    resolved_output = _resolve_output_path(inferred_source_id, args.output)
+
     print(f"\n{'='*60}")
     print(f"  VN TXT -> JSONL Converter")
-    print(f"  Source: {args.source_dir}")
-    print(f"  Output: {args.output}")
+    print(f"  Source: {resolved_source_dir}")
+    print(f"  Output: {resolved_output}")
     if args.max_files:
         print(f"  Pilot mode: max {args.max_files} files")
     print(f"{'='*60}\n")
 
     summary = process_directory(
-        source_dir=args.source_dir,
-        output_path=args.output,
-        source_id=args.source_id,
+        source_dir=str(resolved_source_dir),
+        output_path=str(resolved_output),
+        source_id=inferred_source_id,
         max_files=args.max_files,
         dry_run=args.dry_run,
         verbose=args.verbose,

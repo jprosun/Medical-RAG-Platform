@@ -8,7 +8,7 @@ Cleans raw text extracted from Vietnamese medical PDFs:
   - Whitespace normalization
 
 Usage:
-    from etl.vn.vn_text_cleaner import clean
+    from pipelines.etl.vn.vn_text_cleaner import clean
     cleaned = clean(raw_body)
 """
 

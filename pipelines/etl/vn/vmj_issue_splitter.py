@@ -9,9 +9,13 @@ from typing import List, Dict
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-BASE_DIR = Path(__file__).resolve().parents[4]
-VMJ_DIR = BASE_DIR / "rag-data" / "data_processed" / "vmj_ojs"
-OUTPUT_DIR = BASE_DIR / "rag-data" / "data_intermediate" / "vmj_ojs_split_articles"
+BASE_DIR = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(BASE_DIR))
+
+from services.utils.data_paths import preferred_processed_dir, source_intermediate_dir  # noqa: E402
+
+VMJ_DIR = preferred_processed_dir("vmj_ojs")
+OUTPUT_DIR = source_intermediate_dir("vmj_ojs", "split_articles")
 MANIFEST_FILE = BASE_DIR / "benchmark" / "reports" / "vmj_split_manifest.jsonl"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -28,10 +28,6 @@ SEED_FILE = os.path.join(OUTPUT_DIR, "seed_whitelist_v1.jsonl")
 DRAFT_FILE = os.path.join(OUTPUT_DIR, "draft_queries_v1.jsonl")
 PILOT_FILE = os.path.join(OUTPUT_DIR, "draft_queries_pilot.jsonl")
 
-OPENROUTER_API_KEY = os.environ.get(
-    "OPENROUTER_API_KEY",
-    "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"
-)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_ID = "google/gemini-2.5-flash"
 
@@ -50,6 +46,18 @@ TAXONOMY_WEIGHTS = {
 
 # Load prompt from external file to avoid encoding issues in source
 PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt_step2.txt")
+
+
+def _get_openrouter_api_key() -> str:
+    key = (
+        os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPEN_ROUTER_API_KEY")
+    )
+    if not key:
+        raise RuntimeError(
+            "Missing OpenRouter API key. Set OPENROUTER_API_KEY or OPEN_ROUTER_API_KEY in your environment/.env."
+        )
+    return key
 
 
 def _load_prompt():
@@ -114,6 +122,7 @@ def assign_taxonomy(num_seeds: int, rng: random.Random) -> list:
 def call_llm(http_client: httpx.Client, system_prompt: str,
              seed: Dict, assigned_types: List[str],
              num_queries: int) -> Optional[List[Dict]]:
+    api_key = _get_openrouter_api_key()
     user_prompt = build_user_prompt(seed, assigned_types, num_queries)
 
     payload = {
@@ -127,7 +136,7 @@ def call_llm(http_client: httpx.Client, system_prompt: str,
     }
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/medqa-benchmark",
         "X-Title": "MedQA Gold Pipeline",

@@ -20,12 +20,17 @@ DEFAULT_EMBEDDING_PROFILE = "multilingual"
 
 KNOWN_SOURCE_IDS = (
     "cantho_med_journal",
+    "cdc_health_topics",
     "dav_gov",
     "hue_jmp_ojs",
     "kcb_moh",
+    "mayo_diseases_conditions",
     "medlineplus",
     "mil_med_pharm_journal",
+    "msd_manual_consumer",
+    "msd_manual_professional",
     "ncbi_bookshelf",
+    "nhs_health_a_z",
     "trad_med_pharm_journal",
     "vmj_ojs",
     "who",
@@ -141,6 +146,10 @@ def source_root(source_id: str) -> Path:
 
 def source_raw_dir(source_id: str) -> Path:
     return source_root(source_id) / "raw"
+
+
+def source_manifest_path(source_id: str, filename: str = "manifest.csv") -> Path:
+    return source_root(source_id) / filename
 
 
 def source_processed_dir(source_id: str) -> Path:

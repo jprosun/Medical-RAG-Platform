@@ -44,6 +44,17 @@ def test_source_release_records_path(tmp_path, monkeypatch):
     )
 
 
+def test_source_manifest_path(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    legacy_root = tmp_path / "data"
+    monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
+    monkeypatch.setenv("LEGACY_DATA_ROOT", str(legacy_root))
+
+    module = _reload_data_paths()
+
+    assert module.source_manifest_path("who") == rag_root / "sources" / "who" / "manifest.csv"
+
+
 def test_ensure_rag_data_layout_creates_canonical_scaffold(tmp_path, monkeypatch):
     rag_root = tmp_path / "rag-data"
     legacy_root = tmp_path / "data"

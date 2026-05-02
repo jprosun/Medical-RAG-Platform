@@ -138,12 +138,13 @@ def _get(url: str, params: dict = None, retries: int = 3) -> Optional[str]:
 
 
 # ── Search NCBI Bookshelf ────────────────────────────────────────────
-def search_bookshelf(query: str, max_results: int = 5) -> List[str]:
+def search_bookshelf(query: str, max_results: int = 5, retstart: int = 0, title_only: bool = True) -> List[str]:
     """Search NCBI Bookshelf for a topic, return list of book chapter IDs."""
     params = {
         "db": "books",
-        "term": f"{query}[title] AND statpearls[book]",
+        "term": f"{query}[title] AND statpearls[book]" if title_only else query,
         "retmax": max_results,
+        "retstart": retstart,
         "retmode": "json",
     }
     text = _get(NCBI_ESEARCH, params=params)
@@ -156,6 +157,55 @@ def search_bookshelf(query: str, max_results: int = 5) -> List[str]:
         return ids
     except (json.JSONDecodeError, KeyError):
         return []
+
+
+def discover_bookshelf_ids(
+    max_items: int = 0,
+    *,
+    topic_results: int = 12,
+    global_page_size: int = 200,
+) -> List[str]:
+    """Discover a broader set of NCBI Bookshelf chapter IDs than the old 100-cap flow.
+
+    Strategy:
+    1. Collect topic-targeted StatPearls matches for precision.
+    2. Backfill with paged broad searches over StatPearls and InformedHealth.
+    """
+    discovered: List[str] = []
+    seen: set[str] = set()
+    limit = max_items or 2000
+
+    def _add(ids: List[str]) -> None:
+        for chapter_id in ids:
+            if chapter_id in seen:
+                continue
+            seen.add(chapter_id)
+            discovered.append(chapter_id)
+            if len(discovered) >= limit:
+                break
+
+    for topic in MEDICAL_TOPICS:
+        if len(discovered) >= limit:
+            break
+        _add(search_bookshelf(topic, max_results=topic_results))
+
+    broad_queries = [
+        "statpearls[book]",
+        "\"InformedHealth\"[book]",
+    ]
+    for query in broad_queries:
+        retstart = 0
+        while len(discovered) < limit:
+            ids = search_bookshelf(query, max_results=global_page_size, retstart=retstart, title_only=False)
+            if not ids:
+                break
+            before = len(discovered)
+            _add(ids)
+            if len(discovered) == before:
+                break
+            retstart += global_page_size
+
+    return discovered[:limit]
 
 
 # ── Fetch chapter content ────────────────────────────────────────────

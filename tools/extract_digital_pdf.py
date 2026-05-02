@@ -1,119 +1,78 @@
 """
-Extract text from all digital PDFs identified by classify_pdfs.py.
+Extract text from digital PDFs listed in rag-data/corpus_catalog.csv.
 
-For each PDF, outputs a .txt file preserving the canonical source structure:
+Outputs one .txt per extracted PDF under:
   rag-data/sources/{source_id}/processed/{filename}.txt
-
-Each .txt file includes metadata header + clean text per page.
 """
+
+from __future__ import annotations
+
 import csv
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
 import fitz  # pymupdf
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+from services.utils.data_paths import RAG_DATA_ROOT, REPO_ROOT, source_processed_dir
 
-from services.utils.data_paths import RAG_DATA_ROOT, source_processed_dir
 
 CATALOG = RAG_DATA_ROOT / "corpus_catalog.csv"
 REPORT = REPO_ROOT / "tools" / "pdf_classification_report.json"
 BASE_DIR = RAG_DATA_ROOT
 
-# Load classification report to get set of scanned files (to skip)
-with open(REPORT, "r", encoding="utf-8") as f:
-    report = json.load(f)
-scanned_paths = set(item["path"] for item in report.get("scanned_files", []))
-corrupted_paths = set(item["path"] for item in report.get("corrupted_files", []))
-non_pdf_paths = set(item["path"] for item in report.get("non_pdf_files", []))
-skip_paths = scanned_paths | corrupted_paths | non_pdf_paths
+
+def load_skip_paths(report_path: Path = REPORT) -> set[str]:
+    if not report_path.exists():
+        return set()
+    with open(report_path, "r", encoding="utf-8") as fh:
+        report = json.load(fh)
+    scanned_paths = {item["path"] for item in report.get("scanned_files", [])}
+    corrupted_paths = {item["path"] for item in report.get("corrupted_files", [])}
+    non_pdf_paths = {item["path"] for item in report.get("non_pdf_files", [])}
+    return scanned_paths | corrupted_paths | non_pdf_paths
 
 
-def clean_text(text):
-    """Basic text cleaning for PDF-extracted content."""
-    # Remove excessive whitespace but keep paragraph breaks
-    text = re.sub(r'[ \t]+', ' ', text)
-    # Remove lines that are just numbers (page numbers)
-    text = re.sub(r'^\s*\d{1,3}\s*$', '', text, flags=re.MULTILINE)
-    # Collapse 3+ newlines into 2
-    text = re.sub(r'\n{3,}', '\n\n', text)
+def clean_text(text: str) -> str:
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"^\s*\d{1,3}\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def extract_pdf(filepath):
-    """Extract all text from a PDF. Returns (text, page_count)."""
+def extract_pdf(filepath: str | Path) -> tuple[str, int]:
     try:
         doc = fitz.open(filepath)
         pages = []
-        for i, page in enumerate(doc):
+        for page in doc:
             text = page.get_text()
             if text.strip():
                 pages.append(text)
         doc.close()
-        full_text = "\n\n".join(pages)
-        return clean_text(full_text), len(pages)
-    except Exception as e:
-        return f"[ERROR extracting: {e}]", 0
+        return clean_text("\n\n".join(pages)), len(pages)
+    except Exception as exc:
+        return f"[ERROR extracting: {exc}]", 0
 
 
-def main():
-    with open(CATALOG, "r", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+def write_processed_pdf_text(row: dict[str, str], *, base_dir: Path = BASE_DIR) -> tuple[Path, int, int] | None:
+    rel_path = row.get("relative_path", "")
+    source = row.get("source_id", "unknown")
+    filepath = base_dir / rel_path
+    if not filepath.exists():
+        return None
 
-    total = 0
-    extracted = 0
-    skipped = 0
-    errors = 0
-    total_chars = 0
-    total_pages = 0
-    start = time.time()
+    text, pages = extract_pdf(filepath)
+    if not text or text.startswith("[ERROR"):
+        return None
 
-    stats_by_source = {}
-
-    for row in rows:
-        rel_path = row.get("relative_path", "")
-        source = row.get("source_id", "unknown")
-        ext = row.get("extension", "").lower()
-
-        if source not in stats_by_source:
-            stats_by_source[source] = {"extracted": 0, "skipped": 0, "chars": 0, "pages": 0}
-
-        total += 1
-
-        # Skip non-digital PDFs
-        if rel_path in skip_paths or ext != ".pdf":
-            skipped += 1
-            stats_by_source[source]["skipped"] += 1
-            continue
-
-        filepath = BASE_DIR / rel_path
-        if not filepath.exists():
-            skipped += 1
-            stats_by_source[source]["skipped"] += 1
-            continue
-
-        # Extract text
-        text, pages = extract_pdf(filepath)
-
-        if not text or text.startswith("[ERROR"):
-            errors += 1
-            continue
-
-        # Create output path
-        basename = filepath.stem
-        out_source_dir = source_processed_dir(source)
-        out_source_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_source_dir / f"{basename}.txt"
-
-        # Build metadata header
-        header = f"""---
+    out_source_dir = source_processed_dir(source)
+    out_source_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_source_dir / f"{filepath.stem}.txt"
+    header = f"""---
 source_id: {source}
 institution: {row.get('institution_or_journal', '')}
-title: {row.get('title', basename)}
+title: {row.get('title', filepath.stem)}
 source_url: {row.get('item_url', '')}
 file_url: {row.get('file_url', '')}
 pages: {pages}
@@ -121,37 +80,83 @@ chars: {len(text)}
 ---
 
 """
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(header + text)
+    out_path.write_text(header + text, encoding="utf-8")
+    return out_path, len(text), pages
 
+
+def extract_catalog(catalog_path: Path = CATALOG, report_path: Path = REPORT) -> dict:
+    skip_paths = load_skip_paths(report_path)
+    with open(catalog_path, "r", encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    extracted = 0
+    skipped = 0
+    errors = 0
+    total_chars = 0
+    total_pages = 0
+    start = time.time()
+    stats_by_source: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        rel_path = row.get("relative_path", "")
+        source = row.get("source_id", "unknown")
+        ext = row.get("extension", "").lower()
+        stats = stats_by_source.setdefault(source, {"extracted": 0, "skipped": 0, "chars": 0, "pages": 0})
+
+        if rel_path in skip_paths or ext != ".pdf":
+            skipped += 1
+            stats["skipped"] += 1
+            continue
+
+        result = write_processed_pdf_text(row)
+        if result is None:
+            errors += 1
+            continue
+
+        _, chars, pages = result
         extracted += 1
-        total_chars += len(text)
+        total_chars += chars
         total_pages += pages
-        stats_by_source[source]["extracted"] += 1
-        stats_by_source[source]["chars"] += len(text)
-        stats_by_source[source]["pages"] += pages
+        stats["extracted"] += 1
+        stats["chars"] += chars
+        stats["pages"] += pages
 
         if extracted % 500 == 0:
             elapsed = time.time() - start
             print(f"  Extracted {extracted} files ({elapsed:.1f}s) ...")
 
-    elapsed = time.time() - start
+    return {
+        "extracted": extracted,
+        "skipped": skipped,
+        "errors": errors,
+        "total_chars": total_chars,
+        "total_pages": total_pages,
+        "elapsed_seconds": round(time.time() - start, 1),
+        "by_source": stats_by_source,
+    }
 
-    print(f"\n{'='*60}")
-    print(f"EXTRACTION COMPLETE in {elapsed:.1f}s")
-    print(f"{'='*60}")
-    print(f"  Files extracted: {extracted}")
-    print(f"  Files skipped:   {skipped} (scanned/non-pdf/missing)")
-    print(f"  Errors:          {errors}")
-    print(f"  Total pages:     {total_pages}")
-    print(f"  Total text:      {total_chars:,} chars ({total_chars/1024/1024:.1f} MB)")
+
+def main() -> None:
+    report = extract_catalog()
+    print(f"\n{'=' * 60}")
+    print(f"EXTRACTION COMPLETE in {report['elapsed_seconds']:.1f}s")
+    print(f"{'=' * 60}")
+    print(f"  Files extracted: {report['extracted']}")
+    print(f"  Files skipped:   {report['skipped']} (scanned/non-pdf/missing)")
+    print(f"  Errors:          {report['errors']}")
+    print(f"  Total pages:     {report['total_pages']}")
+    print(f"  Total text:      {report['total_chars']:,} chars ({report['total_chars'] / 1024 / 1024:.1f} MB)")
     print()
     print("BY SOURCE:")
-    for src, s in sorted(stats_by_source.items()):
-        mb = s["chars"] / 1024 / 1024
-        print(f"  {src:30s} | extracted={s['extracted']:>4} skipped={s['skipped']:>3} | pages={s['pages']:>5} | {mb:.1f} MB text")
+    for src, stats in sorted(report["by_source"].items()):
+        mb = stats["chars"] / 1024 / 1024
+        print(
+            f"  {src:30s} | extracted={stats['extracted']:>4} skipped={stats['skipped']:>3} "
+            f"| pages={stats['pages']:>5} | {mb:.1f} MB text"
+        )
     print(f"\nOutput root: {RAG_DATA_ROOT / 'sources'}")
 
 
 if __name__ == "__main__":
     main()
+

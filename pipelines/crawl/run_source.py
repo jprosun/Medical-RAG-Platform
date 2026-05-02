@@ -746,6 +746,31 @@ def _crawl_basic_topic_site(
     )
 
 
+def _crawl_reference_site(
+    config: SourceConfig,
+    *,
+    rows: list[dict[str, str]],
+    crawl_run_id: str,
+    max_items: int,
+    resume: bool,
+) -> dict[str, int | str]:
+    from .sources import reference_sites
+
+    return reference_sites.crawl(
+        source_id=config.source_id,
+        rows=rows,
+        crawl_run_id=crawl_run_id,
+        max_items=max_items,
+        resume=resume,
+        get_text=_get_text,
+        download_bytes=_download_bytes,
+        register_download=_register_download,
+        should_skip=_should_skip,
+        utc_now=utc_now,
+        sleep_fn=time.sleep,
+    )
+
+
 def run_source(
     *,
     source_id: str,
@@ -781,6 +806,8 @@ def run_source(
         report = _crawl_vmj_ojs(config, rows=rows, crawl_run_id=crawl_run_id, max_items=max_items, resume=resume)
     elif config.mode == "basic_topic_site":
         report = _crawl_basic_topic_site(config, rows=rows, crawl_run_id=crawl_run_id, max_items=max_items, resume=resume)
+    elif config.mode == "reference_site":
+        report = _crawl_reference_site(config, rows=rows, crawl_run_id=crawl_run_id, max_items=max_items, resume=resume)
     elif config.mode == "seed_catalog_refresh":
         report = _crawl_seed_catalog_source(config, rows=rows, crawl_run_id=crawl_run_id, max_items=max_items, resume=resume)
     else:

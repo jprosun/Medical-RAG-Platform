@@ -298,3 +298,69 @@ def test_repair_vmj_ojs_rows_rewrites_view_links_and_resets_status(tmp_path, mon
     assert rows[0]["sha256"] == ""
     assert not raw_path.exists()
     assert not processed_path.exists()
+
+
+def test_vmj_frontier_cache_reuses_cached_issue_urls_and_pending_queue(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    _reload_run_source(monkeypatch, rag_root)
+    vmj = importlib.import_module("pipelines.crawl.sources.vmj_ojs")
+
+    monkeypatch.setattr(vmj, "source_qa_dir", lambda source_id: rag_root / "sources" / source_id / "qa")
+
+    get_text_calls: list[str] = []
+
+    def fake_get_text(url: str):
+        get_text_calls.append(url)
+        if url.endswith("/issue/archive"):
+            return '<a href="/index.php/vmj/issue/view/389">Issue 389</a>'
+        if url.endswith("/issue/view/389"):
+            return """
+                <a href="/index.php/vmj/article/view/17924">Example Article</a>
+                <a href="/index.php/vmj/article/view/17924/15235">PDF</a>
+            """
+        if url.endswith("/article/view/17924/15235"):
+            return '<a class="download" href="https://tapchiyhocvietnam.vn/index.php/vmj/article/download/17924/15235/30360">Tải xuống</a>'
+        return None
+
+    downloads: list[dict[str, str]] = []
+
+    def fake_register_download(**kwargs):
+        downloads.append(kwargs)
+        return {}, "downloaded"
+
+    report1 = vmj.crawl(
+        rows=[],
+        crawl_run_id="crawl_vmj_ojs_test",
+        max_items=1,
+        resume=True,
+        get_text=fake_get_text,
+        download_bytes=lambda url: (b"%PDF-1.7", {"http_status": "200", "mime_type": "application/pdf"}),
+        register_download=fake_register_download,
+        should_skip=lambda rows, item_url="", file_url="": False,
+        utc_now=lambda: "2026-05-02T00:00:00Z",
+        sleep_fn=lambda _: None,
+    )
+
+    frontier_path = rag_root / "sources" / "vmj_ojs" / "qa" / "vmj_ojs_frontier.json"
+    assert frontier_path.exists()
+    assert report1["downloaded"] == 1
+    assert downloads
+
+    get_text_calls.clear()
+    downloads.clear()
+
+    report2 = vmj.crawl(
+        rows=[],
+        crawl_run_id="crawl_vmj_ojs_test_2",
+        max_items=1,
+        resume=True,
+        get_text=fake_get_text,
+        download_bytes=lambda url: (b"%PDF-1.7", {"http_status": "200", "mime_type": "application/pdf"}),
+        register_download=fake_register_download,
+        should_skip=lambda rows, item_url="", file_url="": True,
+        utc_now=lambda: "2026-05-02T00:00:00Z",
+        sleep_fn=lambda _: None,
+    )
+
+    assert report2["downloaded"] == 0
+    assert "https://tapchiyhocvietnam.vn/index.php/vmj/issue/archive" not in get_text_calls

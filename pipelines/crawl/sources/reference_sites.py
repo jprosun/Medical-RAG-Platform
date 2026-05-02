@@ -7,75 +7,106 @@ from urllib.parse import urljoin, urlparse
 
 
 SOURCE_CONFIGS: dict[str, dict[str, object]] = {
-    "nhs_health_a_z": {
-        "seed_urls": ["https://www.nhs.uk/health-a-to-z/"],
-        "allowed_hosts": {"www.nhs.uk", "nhs.uk"},
-        "candidate_prefixes": ["/conditions/", "/medicines/", "/tests-and-treatments/", "/symptoms/"],
-        "follow_prefixes": ["/health-a-to-z/", "/conditions/", "/medicines/", "/tests-and-treatments/", "/symptoms/"],
-        "exclude_tokens": ["/search-results", "/live-well/", "/services/", "/conditions-a-to-z/"],
-        "max_pages": 80,
-        "max_depth": 2,
-        "item_type": "health_topic",
-    },
-    "msd_manual_consumer": {
-        "seed_urls": ["https://www.msdmanuals.com/home/health-topics"],
-        "allowed_hosts": {"www.msdmanuals.com", "msdmanuals.com"},
-        "candidate_prefixes": ["/home/"],
-        "follow_prefixes": ["/home/health-topics", "/home/"],
-        "exclude_tokens": ["/home/multimedia", "/home/resources", "/home/professional", "/home/news", "/home/quizzes"],
-        "max_pages": 120,
-        "max_depth": 2,
-        "item_type": "consumer_topic",
-    },
-    "msd_manual_professional": {
-        "seed_urls": ["https://www.msdmanuals.com/professional/health-topics"],
-        "allowed_hosts": {"www.msdmanuals.com", "msdmanuals.com"},
-        "candidate_prefixes": ["/professional/"],
-        "follow_prefixes": ["/professional/health-topics", "/professional/"],
-        "exclude_tokens": ["/professional/multimedia", "/professional/resources", "/professional/news", "/professional/quizzes", "/professional/commentary"],
-        "max_pages": 140,
-        "max_depth": 2,
-        "item_type": "professional_topic",
-    },
-    "cdc_health_topics": {
-        "seed_urls": ["https://cdc.gov/health-topics.html"],
-        "allowed_hosts": {"www.cdc.gov", "cdc.gov"},
-        "candidate_prefixes": ["/"],
-        "follow_prefixes": ["/health-topics", "/"],
-        "exclude_tokens": [
-            "/media/",
-            "/about/",
-            "/other/",
-            "/agency/",
-            "/museum/",
-            "/training/",
-            "/vaccines/",
-            "/search",
-            "/spanish/",
-            "/nchs/",
-            "/mmwr/",
-            "/surveillance/",
-            "/data-statistics/",
-            "/cdc-info/",
-            "/fellowships/",
-            "/budget/",
-            "/foia/",
-            "/oeeo/",
-            "/jobs/",
+    "nice_guidance": {
+        "seed_urls": [
+            "https://www.nice.org.uk/guidance/published",
+            "https://www.nice.org.uk/guidance/conditions-and-diseases",
         ],
-        "max_pages": 80,
-        "max_depth": 1,
-        "item_type": "health_topic",
+        "allowed_hosts": {"www.nice.org.uk", "nice.org.uk"},
+        "candidate_prefixes": ["/guidance/"],
+        "candidate_contains": ["/resources/"],
+        "follow_prefixes": ["/guidance/"],
+        "exclude_tokens": ["/about/", "/news/", "/media/", "/terms-and-conditions"],
+        "max_pages": 240,
+        "max_depth": 3,
+        "item_type": "guidance_page",
     },
-    "mayo_diseases_conditions": {
-        "seed_urls": ["https://www.mayoclinic.org/diseases-conditions/index.aspx"],
-        "allowed_hosts": {"www.mayoclinic.org", "mayoclinic.org"},
-        "candidate_prefixes": ["/diseases-conditions/"],
-        "follow_prefixes": ["/diseases-conditions/"],
-        "exclude_tokens": ["/symptom-checker", "/doctors-departments", "/tests-procedures", "/drugs-supplements"],
+    "uspstf_recommendations": {
+        "seed_urls": [
+            "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation-topics",
+            "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation-topics/uspstf-a-and-b-recommendations",
+        ],
+        "allowed_hosts": {"www.uspreventiveservicestaskforce.org", "uspreventiveservicestaskforce.org"},
+        "candidate_prefixes": ["/uspstf/recommendation/"],
+        "follow_prefixes": ["/uspstf/recommendation-topics", "/uspstf/recommendation/"],
+        "exclude_tokens": ["/search", "/about-uspstf", "/tools", "/announcements"],
         "max_pages": 120,
         "max_depth": 2,
-        "item_type": "disease_condition",
+        "item_type": "recommendation_page",
+    },
+    "nccih_health": {
+        "seed_urls": [
+            "https://www.nccih.nih.gov/health/atoz/",
+            "https://www.nccih.nih.gov/health/herbsataglance",
+        ],
+        "allowed_hosts": {"www.nccih.nih.gov", "nccih.nih.gov"},
+        "candidate_prefixes": ["/health/"],
+        "follow_prefixes": ["/health/atoz", "/health/"],
+        "exclude_tokens": ["/news/", "/research/", "/grants/", "/about/", "/training/"],
+        "max_pages": 180,
+        "max_depth": 2,
+        "item_type": "health_topic",
+    },
+    "nci_pdq": {
+        "seed_urls": [
+            "https://www.cancer.gov/publications/pdq/information-summaries",
+            "https://www.cancer.gov/publications/pdq/information-summaries/adult-treatment",
+            "https://www.cancer.gov/publications/pdq/information-summaries/screening",
+            "https://www.cancer.gov/publications/pdq/information-summaries/prevention",
+            "https://www.cancer.gov/publications/pdq/information-summaries/cam",
+        ],
+        "allowed_hosts": {"www.cancer.gov", "cancer.gov"},
+        "candidate_prefixes": ["/publications/pdq/", "/about-cancer/"],
+        "candidate_contains": ["-pdq"],
+        "follow_prefixes": ["/publications/pdq/", "/about-cancer/"],
+        "exclude_tokens": ["/news-events/", "/about-nci/", "/grants-training/", "/research/"],
+        "max_pages": 260,
+        "max_depth": 3,
+        "item_type": "pdq_summary",
+    },
+    "vncdc_documents": {
+        "seed_urls": [
+            "https://vncdc.gov.vn/",
+            "https://vncdc.gov.vn/vi/tai-lieu-truyen-thong.html",
+            "https://vncdc.gov.vn/vi/van-ban.html",
+        ],
+        "allowed_hosts": {"www.vncdc.gov.vn", "vncdc.gov.vn"},
+        "candidate_prefixes": ["/vi/"],
+        "candidate_contains": ["/files/", "/media/", "/tai-lieu", "/huong-dan", "/van-ban", "/so-tay"],
+        "follow_prefixes": ["/vi/"],
+        "exclude_tokens": ["/lien-he", "/gioi-thieu", "/tim-kiem", "/video"],
+        "max_pages": 220,
+        "max_depth": 2,
+        "item_type": "document_page",
+    },
+    "vaac_hiv_aids": {
+        "seed_urls": [
+            "https://vaac.gov.vn/",
+            "https://vaac.gov.vn/chuyen-muc/tai-lieu-chuyen-mon",
+            "https://vaac.gov.vn/xet-nghiem-hiv",
+        ],
+        "allowed_hosts": {"www.vaac.gov.vn", "vaac.gov.vn"},
+        "candidate_prefixes": ["/"],
+        "candidate_contains": ["/tai-lieu", "/hiv", "/arv", "/prep", "/pep", "/methadone", "/xet-nghiem", "/dieu-tri"],
+        "follow_prefixes": ["/"],
+        "exclude_tokens": ["/tim-kiem", "/lien-he", "/chuyen-trang"],
+        "max_pages": 220,
+        "max_depth": 2,
+        "item_type": "hiv_guidance_page",
+    },
+    "vien_dinh_duong": {
+        "seed_urls": [
+            "https://viendinhduong.vn/vi/trang-chu.html",
+            "https://viendinhduong.vn/vi/tin-tuc.html",
+        ],
+        "allowed_hosts": {"www.viendinhduong.vn", "viendinhduong.vn"},
+        "candidate_prefixes": ["/vi/"],
+        "candidate_contains": ["/dinh-duong", "/tai-lieu", "/hoi-dap", "/vi-chat", "/an-toan-thuc-pham", "/nhu-cau-dinh-duong"],
+        "follow_prefixes": ["/vi/"],
+        "exclude_tokens": ["/lien-he", "/dang-nhap", "/tim-kiem"],
+        "max_pages": 220,
+        "max_depth": 2,
+        "item_type": "nutrition_page",
     },
 }
 
@@ -87,13 +118,6 @@ FILE_ASSET_EXTENSIONS = {
     ".xlsx",
     ".ppt",
     ".pptx",
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".tiff",
-    ".webp",
     ".zip",
 }
 
@@ -123,7 +147,7 @@ def _filename_hint(url: str, fallback: str) -> str:
 
 def _config(source_id: str) -> dict[str, object]:
     if source_id not in SOURCE_CONFIGS:
-        raise ValueError(f"Unsupported basic topic source: {source_id}")
+        raise ValueError(f"Unsupported reference source: {source_id}")
     return SOURCE_CONFIGS[source_id]
 
 
@@ -131,27 +155,16 @@ def is_candidate_url(source_id: str, url: str) -> bool:
     config = _config(source_id)
     parsed = urlparse(url)
     host = parsed.netloc.lower()
-    path = parsed.path
-    path_lower = path.lower()
+    path_lower = parsed.path.lower()
     if host not in config["allowed_hosts"]:
-        return False
-    if _looks_like_file_asset(url):
         return False
     if any(token in path_lower for token in config["exclude_tokens"]):
         return False
-    if source_id == "cdc_health_topics":
-        if path_lower in {"", "/"} or path_lower == "/health-topics.html":
-            return False
-        if any(token in path_lower for token in ("/cdc-info/", "/fellowships/", "/budget/", "/foia/", "/oeeo/", "/jobs/")):
-            return False
-        if path_lower.count("/") > 3:
-            return False
-        return path_lower.endswith(".html") or path_lower.endswith("/")
-    if source_id == "mayo_diseases_conditions":
-        if "index?letter=" in url.lower():
-            return False
-        return "/symptoms-causes/" in path_lower or "/diagnosis-treatment/" in path_lower
-    return any(path_lower.startswith(prefix.lower()) for prefix in config["candidate_prefixes"])
+    if _looks_like_file_asset(url):
+        return True
+    if any(path_lower.startswith(prefix.lower()) for prefix in config.get("candidate_prefixes", [])):
+        return True
+    return any(token.lower() in path_lower for token in config.get("candidate_contains", []))
 
 
 def is_follow_url(source_id: str, url: str) -> bool:
@@ -165,7 +178,9 @@ def is_follow_url(source_id: str, url: str) -> bool:
         return False
     if any(token in path_lower for token in config["exclude_tokens"]):
         return False
-    return any(path_lower.startswith(prefix.lower()) for prefix in config["follow_prefixes"])
+    if any(path_lower.startswith(prefix.lower()) for prefix in config.get("follow_prefixes", [])):
+        return True
+    return any(token.lower() in path_lower for token in config.get("candidate_contains", []))
 
 
 def discover_items(
@@ -195,6 +210,7 @@ def discover_items(
         html = get_text(page_url)
         if not html:
             continue
+
         soup = BeautifulSoup(html, "html.parser")
         for anchor in soup.find_all("a", href=True):
             target_url = normalize_href(page_url, anchor.get("href", ""))
@@ -236,12 +252,9 @@ def crawl(
     skipped = 0
     failed = 0
 
-    print(
-        f"[{source_id}] discovered {len(items)} candidate topic page(s)",
-        flush=True,
-    )
+    print(f"[{source_id}] discovered {len(items)} candidate item(s)", flush=True)
 
-    for index, item in enumerate(items, start=1):
+    for item in items:
         item_url = item["url"]
         if resume and should_skip(rows, item_url=item_url):
             skipped += 1
@@ -275,16 +288,11 @@ def crawl(
             downloaded_at=downloaded_at,
         )
         downloaded += 1
-        if downloaded == 1 or downloaded % 25 == 0 or index == len(items):
-            print(
-                f"[{source_id}] downloaded={downloaded} skipped={skipped} failed={failed}",
-                flush=True,
-            )
         sleep_fn(0.25)
 
     return {
         "source_id": source_id,
-        "mode": "basic_topic_site",
+        "mode": "reference_site",
         "downloaded": downloaded,
         "skipped": skipped,
         "failed": failed,

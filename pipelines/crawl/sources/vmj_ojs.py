@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
+from services.utils.data_paths import source_qa_dir
+
 
 VMJ_ARCHIVE_URL = "https://tapchiyhocvietnam.vn/index.php/vmj/issue/archive"
+FRONTIER_FILENAME = "vmj_ojs_frontier.json"
 
 
 def normalize_href(base_url: str, href: str) -> str:
@@ -164,6 +168,45 @@ def resolve_download_url(wrapper_view_url: str, get_text: Callable[[str], str | 
     return extract_direct_download_url_from_html(wrapper_view_url, html) or fallback_download_url_from_view_url(wrapper_view_url)
 
 
+def _frontier_path() -> Path:
+    qa_dir = source_qa_dir("vmj_ojs")
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    return qa_dir / FRONTIER_FILENAME
+
+
+def _load_frontier() -> dict[str, object]:
+    path = _frontier_path()
+    if not path.exists():
+        return {
+            "issue_urls": [],
+            "issue_cursor": 0,
+            "pending_articles": [],
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "issue_urls": [],
+            "issue_cursor": 0,
+            "pending_articles": [],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "issue_urls": [],
+            "issue_cursor": 0,
+            "pending_articles": [],
+        }
+    payload.setdefault("issue_urls", [])
+    payload.setdefault("issue_cursor", 0)
+    payload.setdefault("pending_articles", [])
+    return payload
+
+
+def _save_frontier(frontier: dict[str, object]) -> None:
+    path = _frontier_path()
+    path.write_text(json.dumps(frontier, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def repair_rows(
     rows: list[dict[str, str]],
     *,
@@ -215,6 +258,83 @@ def repair_rows(
     return repaired
 
 
+def _ensure_issue_urls(
+    frontier: dict[str, object],
+    *,
+    get_text: Callable[[str], str | None],
+    max_items: int,
+) -> list[str]:
+    issue_urls = [str(x) for x in frontier.get("issue_urls", []) if x]
+    if issue_urls:
+        return issue_urls
+
+    archive_page_budget = 200
+    if max_items:
+        archive_page_budget = max(8, min(200, (max_items // 20) + 8))
+
+    issue_urls = discover_issue_urls(get_text, max_pages=archive_page_budget)
+    frontier["issue_urls"] = issue_urls
+    frontier["issue_cursor"] = 0
+    _save_frontier(frontier)
+    return issue_urls
+
+
+def _pending_key(article: dict[str, str]) -> str:
+    return f"{article.get('article_url','')}|{article.get('file_url','')}"
+
+
+def _fill_frontier(
+    frontier: dict[str, object],
+    *,
+    rows: list[dict[str, str]],
+    get_text: Callable[[str], str | None],
+    should_skip: Callable[..., bool],
+    max_items: int,
+) -> tuple[int, int]:
+    issue_urls = _ensure_issue_urls(frontier, get_text=get_text, max_items=max_items)
+    issue_cursor = int(frontier.get("issue_cursor", 0) or 0)
+    pending_articles = list(frontier.get("pending_articles", []))
+    pending_keys = {_pending_key(article) for article in pending_articles if isinstance(article, dict)}
+
+    target_buffer = max(100, max_items * 4 if max_items else 200)
+    discovered_issues = len(issue_urls)
+    scanned_now = 0
+
+    while issue_cursor < discovered_issues and len(pending_articles) < target_buffer:
+        issue_url = issue_urls[issue_cursor]
+        html = get_text(issue_url)
+        issue_cursor += 1
+        scanned_now += 1
+        frontier["issue_cursor"] = issue_cursor
+        if not html:
+            continue
+
+        for article in extract_article_entries_from_html(issue_url, html):
+            key = _pending_key(article)
+            if key in pending_keys:
+                continue
+            item_url = article["article_url"]
+            file_url = article["file_url"]
+            if should_skip(rows, item_url=item_url, file_url=file_url):
+                continue
+            pending_articles.append(article)
+            pending_keys.add(key)
+
+        frontier["pending_articles"] = pending_articles
+        if scanned_now == 1 or scanned_now % 10 == 0:
+            print(
+                f"[vmj_ojs] frontier scan issue {issue_cursor}/{discovered_issues}; "
+                f"pending_queue={len(pending_articles)}",
+                flush=True,
+            )
+        _save_frontier(frontier)
+
+    frontier["issue_cursor"] = issue_cursor
+    frontier["pending_articles"] = pending_articles
+    _save_frontier(frontier)
+    return issue_cursor, discovered_issues
+
+
 def crawl(
     *,
     rows: list[dict[str, str]],
@@ -228,89 +348,88 @@ def crawl(
     utc_now: Callable[[], str],
     sleep_fn: Callable[[float], None],
 ) -> dict[str, int | str]:
-    archive_page_budget = 200
-    if max_items:
-        archive_page_budget = max(8, min(200, (max_items // 20) + 8))
-
-    issue_urls = discover_issue_urls(get_text, max_pages=archive_page_budget)
+    frontier = _load_frontier()
+    issue_cursor, discovered_issues = _fill_frontier(
+        frontier,
+        rows=rows,
+        get_text=get_text,
+        should_skip=should_skip,
+        max_items=max_items,
+    )
     downloaded = 0
     skipped = 0
     failed = 0
     seen_files: set[str] = set()
     limit = max_items or 0
-    discovered_issues = len(issue_urls)
+    pending_articles = list(frontier.get("pending_articles", []))
 
     print(
-        f"[vmj_ojs] discovered {discovered_issues} issue pages "
-        f"(archive_pages={archive_page_budget}, max_items={max_items or 'all'})",
+        f"[vmj_ojs] frontier ready: issues={discovered_issues}, "
+        f"issue_cursor={issue_cursor}, pending_queue={len(pending_articles)}, "
+        f"max_items={max_items or 'all'}",
         flush=True,
     )
 
-    for issue_index, issue_url in enumerate(issue_urls, start=1):
-        html = get_text(issue_url)
-        if not html:
-            failed += 1
+    while pending_articles:
+        article = pending_articles.pop(0)
+        frontier["pending_articles"] = pending_articles
+
+        file_url = article["file_url"]
+        if "/article/view/" in file_url:
+            file_url = resolve_download_url(file_url, get_text)
+        item_url = article["article_url"]
+        if file_url in seen_files:
+            continue
+        seen_files.add(file_url)
+
+        if resume and should_skip(rows, item_url=item_url, file_url=file_url):
+            skipped += 1
+            if skipped == 1 or skipped % 50 == 0:
+                print(f"[vmj_ojs] skipped={skipped} pending_queue={len(pending_articles)}", flush=True)
+            _save_frontier(frontier)
             continue
 
-        if issue_index == 1 or issue_index % 10 == 0:
+        discovered_at = utc_now()
+        try:
+            content, metadata = download_bytes(file_url)
+        except Exception:
+            failed += 1
+            _save_frontier(frontier)
+            continue
+
+        downloaded_at = utc_now()
+        match = re.search(r"/article/(?:view|download)/(\d+)/(\d+)(?:/(\d+))?$", urlparse(file_url).path)
+        if match:
+            suffix = f"_{match.group(3)}" if match.group(3) else ""
+            filename_hint = f"{match.group(1)}_{match.group(2)}{suffix}.pdf"
+        else:
+            filename_hint = "vmj_article.pdf"
+
+        register_download(
+            source_id="vmj_ojs",
+            rows=rows,
+            item_type="journal_pdf",
+            title_hint=article["title"] or "PDF",
+            item_url=item_url,
+            file_url=file_url,
+            parent_item_url=article.get("issue_url", ""),
+            filename_hint=filename_hint,
+            content=content,
+            metadata=metadata,
+            crawl_run_id=crawl_run_id,
+            discovered_at=discovered_at,
+            downloaded_at=downloaded_at,
+        )
+        downloaded += 1
+        if downloaded == 1 or downloaded % 25 == 0:
             print(
-                f"[vmj_ojs] issue {issue_index}/{discovered_issues} "
-                f"downloaded={downloaded} skipped={skipped} failed={failed}",
+                f"[vmj_ojs] saved {downloaded} pdf(s); last={filename_hint}; "
+                f"pending_queue={len(pending_articles)}",
                 flush=True,
             )
-
-        for article in extract_article_entries_from_html(issue_url, html):
-            file_url = article["file_url"]
-            if "/article/view/" in file_url:
-                file_url = resolve_download_url(file_url, get_text)
-            item_url = article["article_url"]
-            if file_url in seen_files:
-                continue
-            seen_files.add(file_url)
-
-            if resume and should_skip(rows, item_url=item_url, file_url=file_url):
-                skipped += 1
-                continue
-
-            discovered_at = utc_now()
-            try:
-                content, metadata = download_bytes(file_url)
-            except Exception:
-                failed += 1
-                continue
-
-            downloaded_at = utc_now()
-            match = re.search(r"/article/(?:view|download)/(\d+)/(\d+)(?:/(\d+))?$", urlparse(file_url).path)
-            if match:
-                suffix = f"_{match.group(3)}" if match.group(3) else ""
-                filename_hint = f"{match.group(1)}_{match.group(2)}{suffix}.pdf"
-            else:
-                filename_hint = "vmj_article.pdf"
-
-            register_download(
-                source_id="vmj_ojs",
-                rows=rows,
-                item_type="journal_pdf",
-                title_hint=article["title"] or "PDF",
-                item_url=item_url,
-                file_url=file_url,
-                parent_item_url=issue_url,
-                filename_hint=filename_hint,
-                content=content,
-                metadata=metadata,
-                crawl_run_id=crawl_run_id,
-                discovered_at=discovered_at,
-                downloaded_at=downloaded_at,
-            )
-            downloaded += 1
-            if downloaded == 1 or downloaded % 25 == 0:
-                print(
-                    f"[vmj_ojs] saved {downloaded} pdf(s); "
-                    f"last={filename_hint}",
-                    flush=True,
-                )
-            if limit and downloaded >= limit:
-                return {"source_id": "vmj_ojs", "mode": "vmj_ojs_site", "downloaded": downloaded, "skipped": skipped, "failed": failed}
-            sleep_fn(0.2)
+        _save_frontier(frontier)
+        if limit and downloaded >= limit:
+            return {"source_id": "vmj_ojs", "mode": "vmj_ojs_site", "downloaded": downloaded, "skipped": skipped, "failed": failed}
+        sleep_fn(0.2)
 
     return {"source_id": "vmj_ojs", "mode": "vmj_ojs_site", "downloaded": downloaded, "skipped": skipped, "failed": failed}

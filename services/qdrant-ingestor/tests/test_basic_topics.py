@@ -44,3 +44,17 @@ def test_cdc_candidate_filter_excludes_health_topics_index():
 
     assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/health-topics.html") is False
     assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/diabetes/index.html") is True
+    assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/fellowships/php/index.html") is False
+
+
+def test_mayo_candidate_filter_prefers_article_pages_over_letter_indexes():
+    module = importlib.import_module("pipelines.crawl.sources.basic_topics")
+
+    assert module.is_candidate_url(
+        "mayo_diseases_conditions",
+        "https://www.mayoclinic.org/diseases-conditions/abdominal-aortic-aneurysm/symptoms-causes/syc-20350688",
+    ) is True
+    assert module.is_candidate_url(
+        "mayo_diseases_conditions",
+        "https://www.mayoclinic.org/diseases-conditions/index?letter=A",
+    ) is False

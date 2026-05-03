@@ -4,13 +4,23 @@ from pathlib import Path
 # Fix encoding
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-BASE_DIR = Path('d:/CODE/DATN/LLM-MedQA-Assistant')
+BASE_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(BASE_DIR))
+
+from services.utils.data_paths import (
+    dataset_records_path,
+    ensure_rag_data_layout,
+    preferred_intermediate_dir,
+    source_intermediate_dir,
+)
+
 MANIFEST_FILE = BASE_DIR / 'benchmark' / 'reports' / 'vmj_split_manifest.jsonl'
-SRC_DIR = BASE_DIR / 'rag-data' / 'data_intermediate' / 'vmj_ojs_split_articles'
-PILOT_DIR = BASE_DIR / 'rag-data' / 'data_intermediate' / 'vmj_ojs_d1_pilot'
-JSONL_OUT = BASE_DIR / 'data' / 'data_final' / 'vmj_ojs_pilot.jsonl'
+SRC_DIR = preferred_intermediate_dir("vmj_ojs", "split_articles")
+PILOT_DIR = source_intermediate_dir("vmj_ojs", "d1_pilot")
+JSONL_OUT = dataset_records_path("vmj_ojs_pilot")
 
 def select_pilot_files():
+    ensure_rag_data_layout(source_ids=["vmj_ojs"], dataset_ids=["vmj_ojs_pilot"])
     if PILOT_DIR.exists():
         shutil.rmtree(PILOT_DIR)
     PILOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,16 +51,16 @@ def select_pilot_files():
 def run_etl():
     print("Running ETL pipeline on pilot...")
     cmd = [
-        "python", "-m", "etl.vn.vn_txt_to_jsonl",
+        "python", "-m", "pipelines.etl.vn.vn_txt_to_jsonl",
         "--source-dir", str(PILOT_DIR),
         "--output", str(JSONL_OUT),
         "--source-id", "vmj_ojs"
     ]
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
-    env["PYTHONPATH"] = str(BASE_DIR / 'services' / 'qdrant-ingestor')
+    env["PYTHONPATH"] = str(BASE_DIR)
     
-    subprocess.run(cmd, env=env, cwd=str(BASE_DIR / 'services' / 'qdrant-ingestor'), check=True)
+    subprocess.run(cmd, env=env, cwd=str(BASE_DIR), check=True)
 
 def evaluate_metrics():
     print("\nEvaluating D1 Metrics...")

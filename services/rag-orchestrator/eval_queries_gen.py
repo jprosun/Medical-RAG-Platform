@@ -1,5 +1,5 @@
 """
-Generate 75+ eval queries based on actual data titles in combined.jsonl.
+Generate 75+ eval queries aligned to the EN dataset release in rag-data/datasets/.
 Each query is tagged with category for per-category analysis.
 
 Usage:

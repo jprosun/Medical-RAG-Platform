@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -162,6 +163,26 @@ def test_register_download_marks_updated_asset_for_same_key(tmp_path, monkeypatc
     assert row["duplicate_status"] == "updated_asset"
     assert row["duplicate_of"] == "old1"
     assert row["relative_path"] != "sources/who/raw/topic.html"
+
+
+def test_write_versioned_asset_shortens_overlong_filename(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module = _reload_run_source(monkeypatch, rag_root)
+
+    long_name = "x" * 260
+    asset_path, rel_path = module._write_versioned_asset(
+        "who",
+        filename_hint=f"{long_name}.html",
+        extension=".html",
+        content=b"<html></html>",
+        previous_row=None,
+        downloaded_at="2026-05-03T00:00:01Z",
+    )
+
+    assert asset_path.exists()
+    assert rel_path.startswith("sources/who/raw/")
+    assert len(asset_path.name) <= module.MAX_RAW_FILENAME_CHARS
+    assert asset_path.suffix == ".html"
 
 
 def test_who_candidate_filters_keep_scope(tmp_path, monkeypatch):
@@ -346,6 +367,26 @@ def test_vmj_frontier_cache_reuses_cached_issue_urls_and_pending_queue(tmp_path,
     assert report1["downloaded"] == 1
     assert downloads
 
+    frontier_path.write_text(
+        json.dumps(
+            {
+                "issue_urls": ["https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/389"],
+                "issue_cursor": 1,
+                "pending_articles": [
+                    {
+                        "article_url": "https://tapchiyhocvietnam.vn/index.php/vmj/article/view/17924",
+                        "file_url": "https://tapchiyhocvietnam.vn/index.php/vmj/article/view/17924/15235",
+                        "title": "Example Article",
+                        "issue_url": "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/389",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
     get_text_calls.clear()
     downloads.clear()
 
@@ -364,3 +405,82 @@ def test_vmj_frontier_cache_reuses_cached_issue_urls_and_pending_queue(tmp_path,
 
     assert report2["downloaded"] == 0
     assert "https://tapchiyhocvietnam.vn/index.php/vmj/issue/archive" not in get_text_calls
+
+
+def test_vmj_frontier_exhausted_rediscovery_expands_issue_urls(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    _reload_run_source(monkeypatch, rag_root)
+    vmj = importlib.import_module("pipelines.crawl.sources.vmj_ojs")
+
+    monkeypatch.setattr(vmj, "source_qa_dir", lambda source_id: rag_root / "sources" / source_id / "qa")
+
+    frontier_path = rag_root / "sources" / "vmj_ojs" / "qa" / "vmj_ojs_frontier.json"
+    frontier_path.parent.mkdir(parents=True, exist_ok=True)
+    frontier_path.write_text(
+        json.dumps(
+            {
+                "issue_urls": ["https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/389"],
+                "issue_cursor": 1,
+                "pending_articles": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    get_text_calls: list[str] = []
+
+    def fake_get_text(url: str):
+        get_text_calls.append(url)
+        if url.endswith("/issue/archive"):
+            return """
+                <a href="/index.php/vmj/issue/view/389">Issue 389</a>
+                <a href="/index.php/vmj/issue/view/390">Issue 390</a>
+            """
+        if url.endswith("/issue/view/389"):
+            return """
+                <a href="/index.php/vmj/article/view/17924">Old Article</a>
+                <a href="/index.php/vmj/article/view/17924/15235">PDF</a>
+            """
+        if url.endswith("/issue/view/390"):
+            return """
+                <a href="/index.php/vmj/article/view/17925">New Article</a>
+                <a href="/index.php/vmj/article/view/17925/15236">PDF</a>
+            """
+        if url.endswith("/article/view/17925/15236"):
+            return '<a class="download" href="https://tapchiyhocvietnam.vn/index.php/vmj/article/download/17925/15236/30362">Tải xuống</a>'
+        return None
+
+    downloads: list[dict[str, str]] = []
+
+    def fake_register_download(**kwargs):
+        downloads.append(kwargs)
+        return {}, "downloaded"
+
+    def fake_should_skip(rows, item_url="", file_url=""):
+        return item_url.endswith("/17924")
+
+    report = vmj.crawl(
+        rows=[],
+        crawl_run_id="crawl_vmj_ojs_refresh_test",
+        max_items=1,
+        resume=True,
+        get_text=fake_get_text,
+        download_bytes=lambda url: (b"%PDF-1.7", {"http_status": "200", "mime_type": "application/pdf"}),
+        register_download=fake_register_download,
+        should_skip=fake_should_skip,
+        utc_now=lambda: "2026-05-04T00:00:00Z",
+        sleep_fn=lambda _: None,
+    )
+
+    assert report["downloaded"] == 1
+    assert downloads
+    assert downloads[0]["item_url"].endswith("/17925")
+    assert "https://tapchiyhocvietnam.vn/index.php/vmj/issue/archive" in get_text_calls
+
+    frontier = json.loads(frontier_path.read_text(encoding="utf-8"))
+    assert frontier["issue_urls"] == [
+        "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/389",
+        "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/390",
+    ]

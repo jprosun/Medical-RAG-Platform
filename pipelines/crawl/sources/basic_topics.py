@@ -62,6 +62,8 @@ SOURCE_CONFIGS: dict[str, dict[str, object]] = {
             "/foia/",
             "/oeeo/",
             "/jobs/",
+            "/contact-us/",
+            "/about-cdc/",
         ],
         "max_pages": 80,
         "max_depth": 1,
@@ -140,9 +142,12 @@ def is_candidate_url(source_id: str, url: str) -> bool:
     if any(token in path_lower for token in config["exclude_tokens"]):
         return False
     if source_id == "cdc_health_topics":
-        if path_lower in {"", "/"} or path_lower == "/health-topics.html":
+        if path_lower in {"", "/", "/index.html", "/index.htm"} or path_lower == "/health-topics.html":
             return False
-        if any(token in path_lower for token in ("/cdc-info/", "/fellowships/", "/budget/", "/foia/", "/oeeo/", "/jobs/")):
+        if any(
+            token in path_lower
+            for token in ("/cdc-info/", "/fellowships/", "/budget/", "/foia/", "/oeeo/", "/jobs/", "/contact-us/", "/about-cdc/")
+        ):
             return False
         if path_lower.count("/") > 3:
             return False
@@ -204,6 +209,23 @@ def discover_items(
             if is_candidate_url(source_id, target_url) and target_url not in discovered_urls:
                 discovered_urls.add(target_url)
                 title = _clean_title(anchor.get_text(" ", strip=True))
+                if source_id == "cdc_health_topics":
+                    lowered_title = title.lower()
+                    if lowered_title in {"contact us", "budget", "foia", "index"}:
+                        continue
+                    if any(
+                        token in lowered_title
+                        for token in (
+                            "affirmative employment",
+                            "alternative dispute resolution",
+                            "equal employment opportunity",
+                            "contact us",
+                            "budget",
+                            "foia",
+                            "about cdc",
+                        )
+                    ):
+                        continue
                 if not title:
                     title = _filename_hint(target_url, source_id)
                 discovered.append({"url": target_url, "title": title})

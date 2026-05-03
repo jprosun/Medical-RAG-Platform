@@ -44,6 +44,8 @@ def test_cdc_candidate_filter_excludes_health_topics_index():
 
     assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/health-topics.html") is False
     assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/diabetes/index.html") is True
+    assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/contact-us/index.html") is False
+    assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/budget/index.html") is False
     assert module.is_candidate_url("cdc_health_topics", "https://cdc.gov/fellowships/php/index.html") is False
 
 

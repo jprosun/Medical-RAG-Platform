@@ -139,9 +139,9 @@ def discover_issue_urls(get_text: Callable[[str], str | None], max_pages: int = 
     issue_seen: set[str] = set()
     archive_seen: set[str] = set()
     queue: list[str] = [VMJ_ARCHIVE_URL]
-    page_budget = max_pages or 200
+    page_budget = max_pages if max_pages > 0 else 0
 
-    while queue and len(archive_seen) < page_budget:
+    while queue and (page_budget <= 0 or len(archive_seen) < page_budget):
         page_url = queue.pop(0)
         if page_url in archive_seen:
             continue
@@ -265,16 +265,29 @@ def _ensure_issue_urls(
     max_items: int,
 ) -> list[str]:
     issue_urls = [str(x) for x in frontier.get("issue_urls", []) if x]
-    if issue_urls:
+    issue_cursor = int(frontier.get("issue_cursor", 0) or 0)
+    pending_articles = list(frontier.get("pending_articles", []))
+
+    frontier_exhausted = bool(issue_urls) and issue_cursor >= len(issue_urls) and not pending_articles
+    if issue_urls and not frontier_exhausted:
         return issue_urls
 
-    archive_page_budget = 200
-    if max_items:
-        archive_page_budget = max(8, min(200, (max_items // 20) + 8))
+    discovered_issue_urls = discover_issue_urls(get_text, max_pages=0)
+    if issue_urls:
+        seen = set(issue_urls)
+        merged_issue_urls = issue_urls + [url for url in discovered_issue_urls if url not in seen]
+        if len(merged_issue_urls) > len(issue_urls):
+            print(
+                f"[vmj_ojs] refreshed issue catalog: {len(issue_urls)} -> {len(merged_issue_urls)}",
+                flush=True,
+            )
+        issue_urls = merged_issue_urls
+        frontier["issue_cursor"] = min(issue_cursor, len(issue_urls))
+    else:
+        issue_urls = discovered_issue_urls
+        frontier["issue_cursor"] = 0
 
-    issue_urls = discover_issue_urls(get_text, max_pages=archive_page_budget)
     frontier["issue_urls"] = issue_urls
-    frontier["issue_cursor"] = 0
     _save_frontier(frontier)
     return issue_urls
 

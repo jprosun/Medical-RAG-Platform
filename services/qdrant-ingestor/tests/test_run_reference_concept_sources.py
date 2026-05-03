@@ -29,3 +29,20 @@ def test_run_reference_concept_sources_calls_run_source_and_optional_extract(mon
     assert crawl_calls == ["nice_guidance", "nccih_health"]
     assert extract_calls == ["nice_guidance", "nccih_health"]
     assert report["sources"] == ["nice_guidance", "nccih_health"]
+
+
+def test_run_reference_concept_sources_supports_easy_batch(monkeypatch):
+    module = importlib.import_module("pipelines.crawl.run_reference_concept_sources")
+
+    crawl_calls: list[str] = []
+    monkeypatch.setattr(module, "run_source", lambda **kwargs: crawl_calls.append(kwargs["source_id"]) or {"source_id": kwargs["source_id"]})
+
+    report = module.run_reference_concept_sources(
+        batch="easy",
+        resume=True,
+        max_items=0,
+        extract=False,
+    )
+
+    assert crawl_calls == ["uspstf_recommendations", "nccih_health", "nci_pdq", "vaac_hiv_aids", "vien_dinh_duong"]
+    assert report["sources"] == ["uspstf_recommendations", "nccih_health", "nci_pdq", "vaac_hiv_aids", "vien_dinh_duong"]

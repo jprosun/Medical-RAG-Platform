@@ -20,6 +20,81 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _postclean_text(text: str, *, source_id: str) -> str:
+    replacements = {
+        "â‰¥": "≥",
+        "â‰¤": "≤",
+        "â€“": "–",
+        "â€”": "—",
+        "â€™": "’",
+        "â€œ": "“",
+        "â€": "”",
+        "â€˜": "‘",
+        "Â©": "©",
+        "Â®": "®",
+        "Â±": "±",
+        "Â°": "°",
+    }
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+
+    lines = [_clean_text(line) for line in text.splitlines()]
+    kept: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        lowered = line.lower()
+
+        if source_id in {"msd_manual_consumer", "msd_manual_professional"}:
+            if lowered in {
+                "search",
+                "language",
+                "select language",
+                "contact us",
+                "health topics",
+                "healthy living",
+                "professional",
+                "consumer",
+                "consumer version",
+                "professional edition",
+                "professional version",
+                "skip to main content",
+                "settings",
+            }:
+                continue
+            if lowered.startswith(("view our ", "follow us on ", "edition switcher", "newsletter")):
+                continue
+            if any(
+                token in lowered
+                for token in (
+                    "skip to main content",
+                    "contact us",
+                    "edition switcher",
+                    "view our facebook page",
+                    "view our x page",
+                    "follow us on",
+                )
+            ):
+                continue
+            if lowered.startswith("©"):
+                continue
+            if any(token in lowered for token in ("red arrow", "white arrow", "yellow arrow", "ctisus")):
+                continue
+
+        if source_id == "cdc_health_topics":
+            if lowered in {"search", "contact us", "budget", "foia", "about cdc", "view all", "index"}:
+                continue
+            if any(
+                token in lowered
+                for token in ("budget", "foia", "contact us", "affirmative employment", "equal employment opportunity")
+            ):
+                continue
+
+        kept.append(line)
+
+    return _clean_text("\n".join(kept))
+
+
 def _fix_common_mojibake(text: str) -> str:
     if not text or not any(token in text for token in ("Ã", "â", "Â")):
         return text
@@ -95,6 +170,49 @@ def _delete_text_asset(source_id: str, stem: str) -> None:
     out_path = _processed_text_path(source_id, stem)
     if out_path.exists():
         out_path.unlink()
+
+
+def _classify_pdf_extract_profile(source_id: str, asset_path: Path) -> dict[str, int | str]:
+    category, pages, total_text = classify_pdf(asset_path)
+    profile: dict[str, int | str] = {
+        "category": category,
+        "pages": pages,
+        "total_text": total_text,
+        "strategy": "classify_pdf",
+        "action": "fail",
+    }
+
+    if source_id != "vien_dinh_duong":
+        if category == "digital":
+            profile["strategy"] = "digital_pdf_text"
+            profile["action"] = "process"
+        elif category == "scanned":
+            profile["strategy"] = "ocr_backlog"
+            profile["action"] = "defer"
+        return profile
+
+    avg_text_per_page = total_text / max(pages, 1)
+    if category == "digital":
+        if pages >= 24:
+            profile["strategy"] = "long_pdf_book"
+            profile["action"] = "defer"
+        elif pages <= 4 and total_text < 600 and avg_text_per_page < 220:
+            profile["strategy"] = "image_pdf_backlog"
+            profile["action"] = "defer"
+        else:
+            profile["strategy"] = "digital_pdf_text"
+            profile["action"] = "process"
+        return profile
+
+    if category == "scanned":
+        if pages >= 24:
+            profile["strategy"] = "long_pdf_book_ocr"
+        else:
+            profile["strategy"] = "image_pdf_backlog"
+        profile["action"] = "defer"
+        return profile
+
+    return profile
 
 
 def _generic_html_to_text(raw_html: str) -> str:
@@ -241,7 +359,7 @@ def _extract_msd_html(raw_html: str) -> str:
     body = re.sub(r"\(\s*See also\s*\)", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\s+\)\s*", ") ", body)
     body = re.sub(r"\(\s+", "(", body)
-    return _clean_text(body)
+    return _postclean_text(body, source_id="msd_manual_professional")
 
 
 def _extract_mayo_html(raw_html: str) -> str:
@@ -311,7 +429,7 @@ def _extract_mayo_html(raw_html: str) -> str:
         blocks.append(text)
 
     cleaned_blocks = _dedupe_blocks(blocks)
-    return _clean_text("\n\n".join(cleaned_blocks))
+    return _postclean_text("\n\n".join(cleaned_blocks), source_id="cdc_health_topics")
 
 
 def _extract_cdc_html(raw_html: str) -> str:
@@ -360,7 +478,7 @@ def _source_specific_html_to_text(source_id: str, raw_html: str) -> str:
     if source_id == "nhs_health_a_z":
         return _extract_nhs_html(raw_html)
     if source_id in {"msd_manual_consumer", "msd_manual_professional"}:
-        return _extract_msd_html(raw_html)
+        return _postclean_text(_extract_msd_html(raw_html), source_id=source_id)
     if source_id == "mayo_diseases_conditions":
         return _extract_mayo_html(raw_html)
     if source_id == "cdc_health_topics":
@@ -383,6 +501,7 @@ def _should_filter_html_page(source_id: str, row: dict[str, str]) -> bool:
             "affirmative-employment",
             "alternative-dispute-resolution",
             "about-us",
+            "about-cdc",
             "budget",
             "cdc-info",
             "contact-us",
@@ -391,6 +510,7 @@ def _should_filter_html_page(source_id: str, row: dict[str, str]) -> bool:
             "fellowships",
             "foia",
             "helpdesk",
+            "index.html",
             "no-fear-act",
             "sams-user-faq",
             "site.html",
@@ -463,6 +583,8 @@ def extract_source(source_id: str) -> dict[str, int | str]:
     deferred = 0
     digital_pdfs = 0
     scanned_pdfs = 0
+    long_pdf_books = 0
+    image_like_pdfs = 0
 
     for rel_path, row in unique_rows.items():
         asset_path = RAG_DATA_ROOT / rel_path
@@ -516,8 +638,16 @@ def extract_source(source_id: str) -> dict[str, int | str]:
             continue
 
         if content_class == "pdf":
-            category, _, _ = classify_pdf(asset_path)
-            if category == "digital":
+            profile = _classify_pdf_extract_profile(source_id, asset_path)
+            category = str(profile["category"])
+            strategy = str(profile["strategy"])
+            action = str(profile["action"])
+            if strategy in {"long_pdf_book", "long_pdf_book_ocr"}:
+                long_pdf_books += 1
+            if strategy == "image_pdf_backlog":
+                image_like_pdfs += 1
+
+            if action == "process":
                 result = write_processed_pdf_text(
                     {
                         "relative_path": rel_path,
@@ -536,12 +666,13 @@ def extract_source(source_id: str) -> dict[str, int | str]:
                 else:
                     processed += 1
                     digital_pdfs += 1
-                    _set_extract_status(rows, rel_path, strategy="digital_pdf_text", status="done")
-            elif category == "scanned":
+                    _set_extract_status(rows, rel_path, strategy=strategy, status="done")
+            elif action == "defer":
                 _delete_text_asset(source_id, asset_stem)
                 deferred += 1
-                scanned_pdfs += 1
-                _set_extract_status(rows, rel_path, strategy="ocr_backlog", status="deferred")
+                if category == "scanned":
+                    scanned_pdfs += 1
+                _set_extract_status(rows, rel_path, strategy=strategy, status="deferred")
             else:
                 _delete_text_asset(source_id, asset_stem)
                 failed += 1
@@ -580,6 +711,8 @@ def extract_source(source_id: str) -> dict[str, int | str]:
         "deferred": deferred,
         "digital_pdfs": digital_pdfs,
         "scanned_pdfs": scanned_pdfs,
+        "long_pdf_books": long_pdf_books,
+        "image_like_pdfs": image_like_pdfs,
     }
     qa_dir = source_qa_dir(source_id)
     qa_dir.mkdir(parents=True, exist_ok=True)

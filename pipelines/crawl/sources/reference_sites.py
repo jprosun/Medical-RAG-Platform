@@ -103,7 +103,32 @@ SOURCE_CONFIGS: dict[str, dict[str, object]] = {
         "candidate_prefixes": ["/vi/"],
         "candidate_contains": ["/dinh-duong", "/tai-lieu", "/hoi-dap", "/vi-chat", "/an-toan-thuc-pham", "/nhu-cau-dinh-duong"],
         "follow_prefixes": ["/vi/"],
-        "exclude_tokens": ["/lien-he", "/dang-nhap", "/tim-kiem"],
+        "exclude_tokens": [
+            "/lien-he",
+            "/dang-nhap",
+            "/tim-kiem",
+            "/hop-tac-quoc-te",
+            "/chuc-nang-nhiem-vu",
+            "/chien-luoc-hop-tac-quoc-te",
+            "/mang-noi-bo",
+            "/site-map",
+            "/sitemap",
+            "/gioi-thieu",
+            "/trang-chu",
+        ],
+        "exclude_title_tokens": [
+            "hợp tác quốc tế",
+            "hop tac quoc te",
+            "chức năng nhiệm vụ",
+            "chuc nang nhiem vu",
+            "mạng nội bộ",
+            "mang noi bo",
+            "site map",
+            "liên hệ",
+            "lien he",
+            "giới thiệu",
+            "gioi thieu",
+        ],
         "max_pages": 220,
         "max_depth": 2,
         "item_type": "nutrition_page",
@@ -136,6 +161,10 @@ def _looks_like_file_asset(url: str) -> bool:
 
 def _clean_title(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip().lower()
 
 
 def _filename_hint(url: str, fallback: str) -> str:
@@ -218,8 +247,11 @@ def discover_items(
                 continue
 
             if is_candidate_url(source_id, target_url) and target_url not in discovered_urls:
-                discovered_urls.add(target_url)
                 title = _clean_title(anchor.get_text(" ", strip=True))
+                normalized_title = _normalize_text(title)
+                if any(token in normalized_title for token in config.get("exclude_title_tokens", [])):
+                    continue
+                discovered_urls.add(target_url)
                 if not title:
                     title = _filename_hint(target_url, source_id)
                 discovered.append({"url": target_url, "title": title})

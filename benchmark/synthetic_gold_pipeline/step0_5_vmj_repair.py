@@ -2,12 +2,30 @@ import os
 import re
 import json
 import hashlib
+import sys
+from pathlib import Path
 from typing import Dict, List, Tuple
 
-DATA_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\data\data_final"
-OUTPUT_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\benchmark\synthetic_gold_pipeline\output"
-INPUT_FILE = os.path.join(DATA_DIR, "vmj_ojs_v2.jsonl")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "vmj_clean_candidates.jsonl")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from services.utils.data_paths import preferred_dataset_records_path
+
+OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_FILE = OUTPUT_DIR / "vmj_clean_candidates.jsonl"
+INPUT_DATASET_IDS = ("vmj_ojs_release_v2", "vmj_ojs_v2")
+
+
+def _resolve_input_file() -> Path:
+    for dataset_id in INPUT_DATASET_IDS:
+        candidate = preferred_dataset_records_path(dataset_id)
+        if candidate.exists():
+            return candidate
+    return preferred_dataset_records_path(INPUT_DATASET_IDS[0])
+
+
+INPUT_FILE = _resolve_input_file()
 
 # Lịch sử các bài đã gặp để chống trùng lặp
 seen_hashes = set()
@@ -128,7 +146,7 @@ def main():
         return
         
     print(f"[*] Starting VMJ Repair on: {INPUT_FILE}")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     clean_candidates = []
     reject_stats = {}

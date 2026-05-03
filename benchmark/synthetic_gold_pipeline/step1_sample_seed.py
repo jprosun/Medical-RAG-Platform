@@ -4,11 +4,13 @@ import json
 import random
 import hashlib
 import unicodedata
+from pathlib import Path
 from typing import Dict, Tuple, List
 
-DATA_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\data\data_final"
-OUTPUT_DIR = r"d:\CODE\DATN\LLM-MedQA-Assistant\benchmark\synthetic_gold_pipeline\output"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "seed_contexts_vmj_v1.jsonl")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_FILE = OUTPUT_DIR / "seed_contexts_vmj_v1.jsonl"
 
 CONFIG = {
     "vmj_clean_candidates.jsonl": {"target": 120, "source_label": "VMJ"},
@@ -394,12 +396,12 @@ def sample_candidates(candidates: List[Dict], target_count: int) -> List[Dict]:
 
 def main() -> None:
     random.seed(RANDOM_SEED)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     all_selected_chunks = []
 
     for filename, cfg in CONFIG.items():
-        filepath = os.path.join(OUTPUT_DIR, filename)
+        filepath = OUTPUT_DIR / filename
         target_count = cfg["target"]
         source_label = cfg["source_label"]
 

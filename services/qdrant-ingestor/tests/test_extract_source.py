@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib
 import json
@@ -178,8 +178,58 @@ def test_extract_source_uses_msd_main_topic_and_filters_utility_page(tmp_path, m
     assert "Cardiac arrest is the cessation of cardiac mechanical activity." in text
     assert "Most cases are caused by cardiac disease." in text
     assert "Should be removed." not in text
+    assert "Contact us" not in text
     assert any(row["relative_path"].endswith("3d-models.html") and row["extract_status"] == "deferred" for row in rows)
 
+
+def test_extract_source_normalizes_common_msd_mojibake(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module, crawl_manifest = _reload_extract_module(monkeypatch, rag_root)
+
+    raw_dir = rag_root / "sources" / "msd_manual_professional" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / "aaa.html"
+    raw_html = (
+        "<html><body>"
+        "<main id='mainContainer'>"
+        "<h1 id='topicHeaderTitle'>AAA</h1>"
+        "<div data-testid='topic-main-content'>"
+        "<p>Abdominal aortic diameter \u00e2\u2030\u00a5 3 cm and risk 4\u00e2\u20ac\u201c5%.</p>"
+        "<p>Most aneurysms grow slowly and may be detected incidentally during imaging or clinical evaluation.</p>"
+        "<p>Diagnosis is usually confirmed with ultrasound or CT scanning, and treatment depends on aneurysm size and rupture risk.</p>"
+        "<p>Contact us</p>"
+        "<p>\u00c2\u00a9 2017 Example MD.</p>"
+        "</div>"
+        "</main>"
+        "</body></html>"
+    )
+    raw_path.write_text(raw_html, encoding="utf-8")
+
+    crawl_manifest.write_manifest(
+        "msd_manual_professional",
+        [
+            {
+                "source_id": "msd_manual_professional",
+                "item_id": "msd3",
+                "relative_path": "sources/msd_manual_professional/raw/aaa.html",
+                "content_class": "html",
+                "title_hint": "AAA",
+                "item_url": "https://www.msdmanuals.com/professional/topic/aaa",
+                "extract_strategy": "html_text",
+                "extract_status": "pending",
+            }
+        ],
+    )
+
+    report = module.extract_source("msd_manual_professional")
+    out_path = rag_root / "sources" / "msd_manual_professional" / "processed" / "aaa.txt"
+    text = out_path.read_text(encoding="utf-8")
+
+    assert report["processed"] == 1
+    assert "≥ 3 cm" in text
+    assert "4–5%" in text
+    assert "Contact us" not in text
+    assert "© 2017" not in text
 
 def test_extract_source_prunes_mayo_footer_and_reference_noise(tmp_path, monkeypatch):
     rag_root = tmp_path / "rag-data"
@@ -252,7 +302,7 @@ def test_extract_source_prunes_cdc_more_information_and_stale_output(tmp_path, m
         <html><head><title>Healthy Eating Tips | CDC</title></head><body>
           <main>
             <h1>Healthy Eating Tips</h1>
-            <p>Español</p>
+            <p>EspaÃ±ol</p>
             <p>At a glance</p>
             <p>Healthy eating means focusing on whole foods, fruits, vegetables, whole grains, beans, nuts, and lower-sodium choices over time.</p>
             <p>Small practical changes can improve dietary quality and reduce the intake of added sugars and highly processed foods.</p>
@@ -303,8 +353,91 @@ def test_extract_source_prunes_cdc_more_information_and_stale_output(tmp_path, m
     assert report["processed"] == 1
     assert report["deferred"] == 1
     assert "Healthy eating means focusing on whole foods" in text
-    assert "Español" not in text
+    assert "EspaÃ±ol" not in text
     assert "More information" not in text
     assert "Content Source:" not in text
     assert stale_out.exists() is False
     assert any(row["relative_path"].endswith("contact-us.html") and row["extract_status"] == "deferred" for row in rows)
+
+
+def test_extract_source_vien_dinh_duong_defers_long_book_pdf(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module, crawl_manifest = _reload_extract_module(monkeypatch, rag_root)
+
+    raw_dir = rag_root / "sources" / "vien_dinh_duong" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / "so-tay-dinh-duong.pdf"
+    raw_path.write_bytes(b"%PDF-1.4 fake")
+
+    crawl_manifest.write_manifest(
+        "vien_dinh_duong",
+        [
+            {
+                "source_id": "vien_dinh_duong",
+                "item_id": "vdd1",
+                "relative_path": "sources/vien_dinh_duong/raw/so-tay-dinh-duong.pdf",
+                "content_class": "pdf",
+                "title_hint": "Sổ tay dinh dưỡng",
+                "item_url": "https://viendinhduong.vn/vi/so-tay-dinh-duong.pdf",
+                "extract_strategy": "classify_pdf",
+                "extract_status": "pending",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(module, "classify_pdf", lambda path: ("digital", 48, 24000))
+
+    report = module.extract_source("vien_dinh_duong")
+    rows = crawl_manifest.read_manifest("vien_dinh_duong")
+
+    assert report["processed"] == 0
+    assert report["deferred"] == 1
+    assert report["long_pdf_books"] == 1
+    assert any(
+        row["relative_path"].endswith("so-tay-dinh-duong.pdf")
+        and row["extract_strategy"] == "long_pdf_book"
+        and row["extract_status"] == "deferred"
+        for row in rows
+    )
+
+
+def test_extract_source_vien_dinh_duong_defers_image_like_pdf(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module, crawl_manifest = _reload_extract_module(monkeypatch, rag_root)
+
+    raw_dir = rag_root / "sources" / "vien_dinh_duong" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / "poster-dinh-duong.pdf"
+    raw_path.write_bytes(b"%PDF-1.4 fake")
+
+    crawl_manifest.write_manifest(
+        "vien_dinh_duong",
+        [
+            {
+                "source_id": "vien_dinh_duong",
+                "item_id": "vdd2",
+                "relative_path": "sources/vien_dinh_duong/raw/poster-dinh-duong.pdf",
+                "content_class": "pdf",
+                "title_hint": "Poster dinh dưỡng",
+                "item_url": "https://viendinhduong.vn/vi/poster-dinh-duong.pdf",
+                "extract_strategy": "classify_pdf",
+                "extract_status": "pending",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(module, "classify_pdf", lambda path: ("digital", 1, 90))
+
+    report = module.extract_source("vien_dinh_duong")
+    rows = crawl_manifest.read_manifest("vien_dinh_duong")
+
+    assert report["processed"] == 0
+    assert report["deferred"] == 1
+    assert report["image_like_pdfs"] == 1
+    assert any(
+        row["relative_path"].endswith("poster-dinh-duong.pdf")
+        and row["extract_strategy"] == "image_pdf_backlog"
+        and row["extract_status"] == "deferred"
+        for row in rows
+    )
+

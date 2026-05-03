@@ -83,6 +83,30 @@ def qa_root_dir() -> Path:
     return RAG_DATA_ROOT / "qa"
 
 
+def data_proceed_root() -> Path:
+    return RAG_DATA_ROOT / "data_proceed"
+
+
+def data_proceed_source_root(source_id: str) -> Path:
+    return data_proceed_root() / source_id
+
+
+def data_proceed_processed_dir(source_id: str) -> Path:
+    return data_proceed_source_root(source_id) / "processed"
+
+
+def data_proceed_records_dir(source_id: str) -> Path:
+    return data_proceed_source_root(source_id) / "records"
+
+
+def data_proceed_records_path(source_id: str, filename: str = "document_records.jsonl") -> Path:
+    return data_proceed_records_dir(source_id) / filename
+
+
+def data_proceed_summary_path(source_id: str, filename: str = "summary.json") -> Path:
+    return data_proceed_source_root(source_id) / filename
+
+
 def migration_audit_path(filename: str = "migration_audit.json") -> Path:
     return qa_root_dir() / filename
 
@@ -99,8 +123,16 @@ def dataset_records_dir(dataset_id: str) -> Path:
     return dataset_root(dataset_id) / "records"
 
 
+def dataset_processed_dir(dataset_id: str) -> Path:
+    return dataset_root(dataset_id) / "processed"
+
+
 def dataset_records_path(dataset_id: str, filename: str = "document_records.jsonl") -> Path:
     return dataset_records_dir(dataset_id) / filename
+
+
+def dataset_processed_manifest_path(dataset_id: str, filename: str = "processed_manifest.jsonl") -> Path:
+    return dataset_processed_dir(dataset_id) / filename
 
 
 def dataset_qa_dir(dataset_id: str) -> Path:
@@ -374,6 +406,7 @@ def ensure_rag_data_layout(
     base_dirs = [
         registry_dir(),
         qa_root_dir(),
+        data_proceed_root(),
         datasets_root(),
         embeddings_exports_dir(),
         embeddings_staging_dir(),
@@ -390,6 +423,8 @@ def ensure_rag_data_layout(
             source_processed_dir(source_id),
             source_records_dir(source_id),
             source_qa_dir(source_id),
+            data_proceed_processed_dir(source_id),
+            data_proceed_records_dir(source_id),
         ):
             path.mkdir(parents=True, exist_ok=True)
             created.append(path)
@@ -398,6 +433,7 @@ def ensure_rag_data_layout(
     for dataset_id in dataset_ids or []:
         for path in (
             dataset_records_dir(dataset_id),
+            dataset_processed_dir(dataset_id),
             dataset_qa_dir(dataset_id),
         ):
             path.mkdir(parents=True, exist_ok=True)

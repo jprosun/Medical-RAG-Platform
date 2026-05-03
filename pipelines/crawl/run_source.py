@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -67,11 +68,29 @@ FILE_ASSET_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+MAX_RAW_FILENAME_CHARS = 140
 
 
 def _safe_filename(name: str, fallback: str = "asset") -> str:
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
     return stem or fallback
+
+
+def _bounded_filename(name: str, *, extension: str = "", limit: int = MAX_RAW_FILENAME_CHARS) -> str:
+    safe = _safe_filename(name, fallback="asset")
+    ext = extension or ""
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    if safe.endswith(ext):
+        safe = safe[: -len(ext)] if ext else safe
+    if len(f"{safe}{ext}") <= limit:
+        return f"{safe}{ext}"
+
+    digest = hashlib.sha1(safe.encode("utf-8")).hexdigest()[:12]
+    reserve = len(ext) + len(digest) + 2
+    stem_limit = max(16, limit - reserve)
+    trimmed = safe[:stem_limit].rstrip("._-") or "asset"
+    return f"{trimmed}__{digest}{ext}"
 
 
 def _filename_from_url(url: str, fallback: str) -> str:
@@ -316,14 +335,13 @@ def _write_versioned_asset(
 
     ext = extension or infer_extension(filename=filename_hint)
     base_name = Path(filename_hint).stem if Path(filename_hint).suffix else filename_hint
-    filename = _safe_filename(base_name, fallback="asset")
-    if ext and not filename.endswith(ext):
-        filename = f"{filename}{ext}"
+    filename = _bounded_filename(base_name, extension=ext)
 
     target = raw_dir / filename
     if previous_row and previous_row.get("sha256") and target.exists():
         stamp = downloaded_at.replace("-", "").replace(":", "")
-        target = raw_dir / f"{Path(filename).stem}__{stamp}{Path(filename).suffix}"
+        versioned_name = _bounded_filename(f"{Path(filename).stem}__{stamp}", extension=Path(filename).suffix)
+        target = raw_dir / versioned_name
 
     target.write_bytes(content)
     rel_path = target.resolve().relative_to(RAG_DATA_ROOT.resolve()).as_posix()

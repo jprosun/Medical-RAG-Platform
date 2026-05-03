@@ -76,3 +76,34 @@ def test_build_dataset_release_dedups_by_source_doc_id(tmp_path, monkeypatch):
 
     assert report["record_count"] == 1
     assert report["duplicates_skipped"] == 1
+
+
+def test_build_dataset_release_collects_processed_files(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    source = rag_root / "sources" / "nhs_health_a_z" / "records" / "document_records.jsonl"
+    processed = rag_root / "sources" / "nhs_health_a_z" / "processed" / "acute-pancreatitis.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    processed.parent.mkdir(parents=True, exist_ok=True)
+    processed.write_text("body", encoding="utf-8")
+
+    record = _record("nhs1", "nhs_health_a_z")
+    record["processed_path"] = "rag-data/sources/nhs_health_a_z/processed/acute-pancreatitis.txt"
+    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    builder = _reload_builder(monkeypatch, rag_root)
+
+    report = builder.build_dataset_release(
+        dataset_id="en_core_v1",
+        source_ids=("nhs_health_a_z",),
+    )
+
+    processed_dir = rag_root / "datasets" / "en_core_v1" / "processed"
+    promoted = list(processed_dir.glob("*.txt"))
+    manifest = processed_dir / "processed_manifest.jsonl"
+
+    assert report["processed_files_copied"] == 1
+    assert len(promoted) == 1
+    assert manifest.exists()
+    manifest_rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert manifest_rows[0]["source_id"] == "nhs_health_a_z"
+    assert manifest_rows[0]["source_processed_path"] == record["processed_path"]

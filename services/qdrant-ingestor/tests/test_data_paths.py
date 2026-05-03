@@ -82,6 +82,7 @@ def test_ensure_rag_data_layout_creates_canonical_scaffold(tmp_path, monkeypatch
         rag_root / "sources" / "who_vietnam" / "records",
         rag_root / "sources" / "who_vietnam" / "qa",
         rag_root / "datasets" / "en_core_v1" / "records",
+        rag_root / "datasets" / "en_core_v1" / "processed",
         rag_root / "datasets" / "en_core_v1" / "qa",
         rag_root / "embeddings" / "exports" / "en_core_v1" / "multilingual",
         rag_root / "embeddings" / "staging" / "en_core_v1" / "multilingual",
@@ -155,3 +156,34 @@ def test_preferred_chunk_texts_uses_root_export_before_kaggle_staging(tmp_path, 
     module = _reload_data_paths()
 
     assert module.preferred_chunk_texts_export_path(dataset_id="vmj_ojs_v2", profile="multilingual") == root_export
+
+
+def test_dataset_processed_paths(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    legacy_root = tmp_path / "data"
+    monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
+    monkeypatch.setenv("LEGACY_DATA_ROOT", str(legacy_root))
+
+    module = _reload_data_paths()
+
+    assert module.dataset_processed_dir("en_core_v1") == rag_root / "datasets" / "en_core_v1" / "processed"
+    assert module.dataset_processed_manifest_path("en_core_v1") == (
+        rag_root / "datasets" / "en_core_v1" / "processed" / "processed_manifest.jsonl"
+    )
+
+
+def test_data_proceed_paths(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    legacy_root = tmp_path / "data"
+    monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
+    monkeypatch.setenv("LEGACY_DATA_ROOT", str(legacy_root))
+
+    module = _reload_data_paths()
+
+    assert module.data_proceed_root() == rag_root / "data_proceed"
+    assert module.data_proceed_processed_dir("nhs_health_a_z") == (
+        rag_root / "data_proceed" / "nhs_health_a_z" / "processed"
+    )
+    assert module.data_proceed_records_path("nhs_health_a_z") == (
+        rag_root / "data_proceed" / "nhs_health_a_z" / "records" / "document_records.jsonl"
+    )

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -19,6 +21,8 @@ from services.utils.data_lineage import file_sha256, make_run_id
 from services.utils.data_paths import (
     KNOWN_SOURCE_IDS,
     dataset_manifest_path,
+    dataset_processed_dir,
+    dataset_processed_manifest_path,
     dataset_qa_dir,
     dataset_records_path,
     ensure_rag_data_layout,
@@ -66,6 +70,15 @@ def _resolve_source_ids(source_ids: list[str], source_group: str) -> tuple[str, 
     return tuple(resolved)
 
 
+def _safe_dataset_processed_name(source_id: str, processed_path: str) -> str:
+    src_name = Path(processed_path).name
+    stem = Path(src_name).stem
+    suffix = Path(src_name).suffix or ".txt"
+    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in stem).strip("._")
+    digest = hashlib.sha1(processed_path.encode("utf-8")).hexdigest()[:10]
+    return f"{source_id}__{safe_stem}__{digest}{suffix}"
+
+
 def build_dataset_release(
     *,
     dataset_id: str,
@@ -76,15 +89,24 @@ def build_dataset_release(
     ensure_rag_data_layout(source_ids=source_ids, dataset_ids=[dataset_id])
 
     output_path = dataset_records_path(dataset_id)
+    processed_dir = dataset_processed_dir(dataset_id)
+    processed_manifest = dataset_processed_manifest_path(dataset_id)
     qa_dir = dataset_qa_dir(dataset_id)
     qa_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    for stale in processed_dir.iterdir():
+        if stale.is_file():
+            stale.unlink()
 
     seen: set[tuple[str, str]] = set()
+    seen_processed_paths: set[str] = set()
     source_summaries: dict[str, dict[str, Any]] = {}
+    processed_entries: list[dict[str, Any]] = []
     records_written = 0
     duplicates_skipped = 0
     validation_errors = 0
     invalid_json_lines = 0
+    processed_files_copied = 0
     etl_run_id = make_run_id("build_dataset", dataset_id)
 
     with open(output_path, "w", encoding="utf-8") as out:
@@ -126,9 +148,34 @@ def build_dataset_release(
                     out.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
                     records_written += 1
                     summary["written_records"] += 1
+
+                    processed_path = str(record.get("processed_path", "")).strip()
+                    if processed_path and processed_path not in seen_processed_paths:
+                        source_processed = Path(processed_path)
+                        if not source_processed.is_absolute():
+                            source_processed = REPO_ROOT / processed_path
+                        if source_processed.exists() and source_processed.is_file():
+                            seen_processed_paths.add(processed_path)
+                            dataset_name = _safe_dataset_processed_name(source_id, processed_path)
+                            dataset_processed = processed_dir / dataset_name
+                            shutil.copy2(source_processed, dataset_processed)
+                            processed_entries.append(
+                                {
+                                    "source_id": source_id,
+                                    "doc_id": str(record.get("doc_id", "")).strip(),
+                                    "title": str(record.get("title", "")).strip(),
+                                    "source_processed_path": processed_path,
+                                    "dataset_processed_path": str(dataset_processed),
+                                }
+                            )
+                            processed_files_copied += 1
             except json.JSONDecodeError:
                 invalid_json_lines += 1
                 summary["invalid_json_lines"] += 1
+
+    with open(processed_manifest, "w", encoding="utf-8") as fh:
+        for entry in processed_entries:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report = {
@@ -145,6 +192,9 @@ def build_dataset_release(
         "duplicates_skipped": duplicates_skipped,
         "validation_errors": validation_errors,
         "invalid_json_lines": invalid_json_lines,
+        "processed_dir": str(processed_dir),
+        "processed_manifest_path": str(processed_manifest),
+        "processed_files_copied": processed_files_copied,
     }
 
     qa_path = qa_dir / "build_summary.json"
@@ -162,6 +212,9 @@ def build_dataset_release(
         "source_ids": list(source_ids),
         "record_count": records_written,
         "dedup_key": dedup_key,
+        "processed_dir": str(processed_dir),
+        "processed_manifest_path": str(processed_manifest),
+        "processed_files_copied": processed_files_copied,
     }
     manifest_path = dataset_manifest_path(dataset_id)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)

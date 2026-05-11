@@ -20,6 +20,12 @@ from services.utils.data_paths import preferred_processed_dir, source_records_pa
 
 
 _RE_FRONTMATTER = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+_MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "â€“", "â€”", "â€™", "â€œ", "â€")
+_GENERIC_NCI_TITLES = {"health professional", "patient", "español", "espanol"}
+_RE_NCI_VERSION_SUFFIX = re.compile(
+    r"\s*[–—-]\s*(Health Professional Version|Patient Version|Versión para profesionales de salud|Versión para pacientes)\s*$",
+    re.IGNORECASE,
+)
 
 
 SOURCE_DEFAULTS: dict[str, dict[str, object]] = {
@@ -105,6 +111,24 @@ def _parse_frontmatter(raw_text: str) -> tuple[dict[str, str], str]:
     return meta, raw_text[match.end() :]
 
 
+def _fix_mojibake(text: str) -> str:
+    if not text or not any(marker in text for marker in _MOJIBAKE_MARKERS):
+        return text
+    try:
+        repaired = text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    return repaired
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
 def _clean_body(text: str, title: str = "") -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -140,31 +164,98 @@ def _source_defaults(source_id: str) -> dict[str, object]:
     return defaults
 
 
+def _frontmatter_overrides(meta: dict[str, str], defaults: dict[str, object]) -> dict[str, object]:
+    merged = dict(defaults)
+    for key in (
+        "source_name",
+        "doc_type",
+        "audience",
+        "language",
+        "specialty",
+        "section_title",
+        "canonical_title",
+        "published_at",
+        "updated_at",
+    ):
+        value = (meta.get(key) or "").strip()
+        if value:
+            merged[key] = value
+
+    trust_value = (meta.get("trust_tier") or "").strip()
+    if trust_value.isdigit():
+        merged["trust_tier"] = int(trust_value)
+    return merged
+
+
+def _apply_nci_pdq_overrides(
+    *,
+    meta: dict[str, str],
+    body: str,
+    defaults: dict[str, object],
+    path: Path,
+) -> tuple[str, str, dict[str, object], str]:
+    first_line = _fix_mojibake(_first_nonempty_line(body))
+    raw_title = _fix_mojibake((meta.get("title") or path.stem).strip())
+    title = first_line if first_line and raw_title.lower() in _GENERIC_NCI_TITLES else raw_title
+    title = title or raw_title or path.stem
+
+    lower_title = title.lower()
+    if "health professional version" in lower_title or "profesionales de salud" in lower_title:
+        defaults["audience"] = "clinician"
+    elif "patient version" in lower_title or "para pacientes" in lower_title:
+        defaults["audience"] = "patient"
+
+    if "versión para" in lower_title or "resumen de información" in _fix_mojibake(body[:400]).lower():
+        defaults["language"] = "es"
+    elif "health professional version" in lower_title or "patient version" in lower_title:
+        defaults["language"] = "en"
+
+    canonical_title = _RE_NCI_VERSION_SUFFIX.sub("", title).strip(" -–—")
+    canonical_title = canonical_title or title
+    body = _fix_mojibake(body)
+    return title, canonical_title, defaults, body
+
+
 def process_file(path: Path, *, source_id: str, etl_run_id: str) -> DocumentRecord | None:
     raw_text = path.read_text(encoding="utf-8", errors="ignore")
     meta, body = _parse_frontmatter(raw_text)
     defaults = _source_defaults(source_id)
-    title = (meta.get("title") or path.stem).strip()
+    defaults = _frontmatter_overrides(meta, defaults)
+    title = _fix_mojibake((meta.get("title") or path.stem).strip())
+    canonical_title = str(defaults.get("canonical_title") or title)
+    if source_id == "nci_pdq":
+        title, canonical_title, defaults, body = _apply_nci_pdq_overrides(
+            meta=meta,
+            body=body,
+            defaults=defaults,
+            path=path,
+        )
+    else:
+        body = _fix_mojibake(body)
     body = _clean_body(body, title=title)
     if len(body) < 120:
         return None
 
     lineage = build_file_lineage(path, source_id=source_id, etl_run_id=etl_run_id)
     source_url = (meta.get("item_url") or meta.get("source_url") or "").strip()
+    section_title = str(defaults.get("section_title") or "Full text")
+    canonical_title = str(defaults.get("canonical_title") or canonical_title or title)
     doc = DocumentRecord(
         doc_id=_stable_doc_id(source_id, path),
         title=title,
         body=body,
         source_name=str(defaults["source_name"]),
-        section_title="Full text",
+        section_title=section_title,
         source_url=source_url,
-        canonical_title=title,
+        canonical_title=canonical_title,
         doc_type=str(defaults["doc_type"]),
         specialty=str(defaults["specialty"]),
         audience=str(defaults["audience"]),
         language=str(defaults["language"]),
         trust_tier=int(defaults["trust_tier"]),
-        heading_path=f"{title} > Full text",
+        heading_path=f"{canonical_title} > {section_title}",
+        published_at=str(defaults.get("published_at") or ""),
+        updated_at=str(defaults.get("updated_at") or ""),
         **lineage,
     )
     return doc

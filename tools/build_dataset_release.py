@@ -36,6 +36,7 @@ SOURCE_GROUPS = {
     "en": EN_SOURCE_IDS,
     "vi": VI_SOURCE_IDS,
     "all": KNOWN_SOURCE_IDS,
+    "none": (),
 }
 
 
@@ -75,6 +76,8 @@ def _safe_dataset_processed_name(source_id: str, processed_path: str) -> str:
     stem = Path(src_name).stem
     suffix = Path(src_name).suffix or ".txt"
     safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in stem).strip("._")
+    if len(safe_stem) > 80:
+        safe_stem = safe_stem[:80].rstrip("._-")
     digest = hashlib.sha1(processed_path.encode("utf-8")).hexdigest()[:10]
     return f"{source_id}__{safe_stem}__{digest}{suffix}"
 
@@ -129,6 +132,8 @@ def build_dataset_release(
             try:
                 iterator = _iter_jsonl_dicts(path)
                 for lineno, record in iterator:
+                    if not str(record.get("source_id", "")).strip():
+                        record["source_id"] = source_id
                     summary["input_records"] += 1
                     try:
                         validation = DocumentRecord.from_dict(record).validate()
@@ -227,12 +232,14 @@ def build_dataset_release(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build a canonical dataset release from source records.")
     parser.add_argument("--dataset-id", required=True)
-    parser.add_argument("--source-group", choices=sorted(SOURCE_GROUPS), default="all")
+    parser.add_argument("--source-group", choices=sorted(SOURCE_GROUPS), default="none")
     parser.add_argument("--source-id", action="append", default=[], dest="source_ids")
     parser.add_argument("--dedup-key", choices=("source_doc_id", "doc_id", "none"), default="source_doc_id")
     args = parser.parse_args()
 
     source_ids = _resolve_source_ids(args.source_ids, args.source_group)
+    if not source_ids:
+        parser.error("Provide --source-id or --source-group (not 'none').")
     report = build_dataset_release(
         dataset_id=args.dataset_id,
         source_ids=source_ids,

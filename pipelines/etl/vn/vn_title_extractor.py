@@ -109,6 +109,16 @@ _RE_TABLE_HEADER = re.compile(
     r"|,\s*$"                       # ends with comma (truncated column)
 )
 
+_RE_WEAK_PHARMA_TITLE = re.compile(
+    r"^(phụ lục\s+[0-9ivx]+[a-z]?|mẫu(?:\s+\d+[a-z]?/?tt)?|biểu mẫu|tt\d+|cv[\w-]*|qd[\w-]*|qld[\w-]*|signed)$",
+    re.IGNORECASE,
+)
+
+_RE_ADMIN_STUB = re.compile(
+    r"^(ký bởi:|cơ quan:|ngày ký:|địa chỉ:|điện thoại|số:|cộng hòa xã hội|độc lập - tự do|sonht\.kcb_)",
+    re.IGNORECASE,
+)
+
 
 def _is_bad_title(text: str) -> bool:
     """Check if extracted text is a bad/invalid title."""
@@ -122,6 +132,15 @@ def _is_bad_title(text: str) -> bool:
     if _RE_TABLE_HEADER.match(t):
         return True
     return False
+
+
+def _is_weak_pharma_title(text: str) -> bool:
+    if not text:
+        return True
+    stripped = re.sub(r"\s+", " ", text).strip()
+    if len(stripped) < 12:
+        return True
+    return bool(_RE_WEAK_PHARMA_TITLE.match(stripped))
 
 
 def extract(
@@ -152,7 +171,7 @@ def extract(
     elif source_id == "kcb_moh":
         return _extract_guideline_title(cleaned_body)
     elif source_id == "dav_gov":
-        return _extract_pharma_title(cleaned_body, file_url)
+        return _extract_pharma_title_v4(cleaned_body, file_url)
     elif source_id == "who_vietnam":
         return _extract_who_title(cleaned_body)
     else:
@@ -390,6 +409,131 @@ def _extract_pharma_title(body: str, file_url: str | None = None) -> str:
         if "chỉ định" in stripped.lower() or "điều trị" in stripped.lower() or "danh mục" in stripped.lower():
             return stripped[:200]
         if len(stripped) >= 30:
+            return stripped[:200]
+
+    return ""
+
+
+def _extract_pharma_title_v4(body: str, file_url: str | None = None) -> str:
+    """Rescue descriptive DAV appendix/form titles and avoid generic slug titles."""
+    _URL_WORD_MAP = {
+        "dm": "danh mục",
+        "thuoc": "thuốc",
+        "dieu": "điều",
+        "tri": "trị",
+        "benh": "bệnh",
+        "hiem": "hiếm",
+        "phu": "phụ",
+        "luc": "lục",
+        "nguyen": "nguyên",
+        "tac": "tắc",
+        "co": "cơ",
+        "ban": "bản",
+        "gmp": "GMP",
+        "who": "WHO",
+        "pics": "PICS",
+        "eu": "EU",
+        "san": "sản",
+        "pham": "phẩm",
+        "mau": "mẫu",
+        "duoc": "dược",
+        "lieu": "liệu",
+        "truyen": "truyền",
+        "vi": "vị",
+        "ho": "hồ",
+        "so": "sơ",
+        "tong": "tổng",
+        "the": "thể",
+        "phan": "phân",
+        "loai": "loại",
+        "ton": "tồn",
+        "tai": "tại",
+        "bieu": "biểu",
+        "van": "văn",
+        "viii": "VIII",
+        "vii": "VII",
+        "ix": "IX",
+        "iv": "IV",
+        "iii": "III",
+        "ii": "II",
+        "i": "I",
+        "x": "X",
+        "v": "V",
+    }
+
+    if file_url:
+        fname = file_url.rsplit("/", 1)[-1] if "/" in file_url else file_url
+        fname = re.sub(r"_\d{8,}\.pdf$", "", fname, flags=re.IGNORECASE)
+        fname = re.sub(r"\.pdf(\.txt)?$", "", fname, flags=re.IGNORECASE)
+        fname = re.sub(r"^\d+[-_]?", "", fname)
+        words = re.split(r"[-_]+", fname)
+        polished_words: list[str] = []
+        for w in words:
+            w_lower = w.lower().strip()
+            if w_lower in _URL_WORD_MAP:
+                polished_words.append(_URL_WORD_MAP[w_lower])
+            elif w_lower:
+                polished_words.append(w_lower)
+        title = " ".join(polished_words).strip()
+        if title:
+            title = title[0].upper() + title[1:]
+            title = re.sub(r"\s+", " ", title)
+            if not _is_weak_pharma_title(title):
+                return title
+
+    lines = body.splitlines()
+    for i, line in enumerate(lines[:60]):
+        stripped = line.strip()
+        if not stripped or len(stripped) < 15:
+            continue
+        if _RE_ADMIN_STUB.match(stripped):
+            continue
+        if _RE_TABLE_HEADER.match(stripped):
+            continue
+        if stripped.endswith(","):
+            continue
+        if re.match(r"^\d+\s+[A-Z]", stripped):
+            continue
+
+        lowered = stripped.lower()
+        if lowered.startswith(("phụ lục", "mẫu", "biểu mẫu")):
+            title_lines = [stripped]
+            for next_line in lines[i + 1 : min(i + 4, len(lines))]:
+                next_stripped = next_line.strip()
+                if (
+                    not next_stripped
+                    or _RE_ADMIN_STUB.match(next_stripped)
+                    or _RE_TABLE_HEADER.match(next_stripped)
+                    or next_stripped.endswith(",")
+                    or next_stripped.startswith("Kính gửi")
+                ):
+                    break
+                if len(next_stripped) >= 8:
+                    title_lines.append(next_stripped)
+            title = " ".join(title_lines[:3]).strip()
+            if not _is_bad_title(title):
+                return title[:200]
+            continue
+
+        if any(token in lowered for token in ("chỉ định", "điều trị", "danh mục", "báo cáo", "đơn đề nghị", "thu hồi", "lưu hành", "thuốc")):
+            title_lines = [stripped]
+            for next_line in lines[i + 1 : min(i + 3, len(lines))]:
+                next_stripped = next_line.strip()
+                if (
+                    not next_stripped
+                    or _RE_ADMIN_STUB.match(next_stripped)
+                    or _RE_TABLE_HEADER.match(next_stripped)
+                    or next_stripped.endswith(",")
+                    or next_stripped.startswith("Kính gửi")
+                ):
+                    break
+                if len(next_stripped) >= 8:
+                    title_lines.append(next_stripped)
+            title = " ".join(title_lines[:3]).strip()
+            if not _is_bad_title(title):
+                return title[:200]
+
+        if len(stripped) >= 30 and not _is_weak_pharma_title(stripped):
             return stripped[:200]
 
     return ""

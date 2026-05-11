@@ -208,6 +208,18 @@ def source_records_path(source_id: str, filename: str = "document_records.jsonl"
     return source_records_dir(source_id) / filename
 
 
+def source_partition_records_dir(source_id: str, partition: str) -> Path:
+    return source_records_dir(source_id) / partition
+
+
+def source_partition_records_path(
+    source_id: str,
+    partition: str,
+    filename: str = "document_records.jsonl",
+) -> Path:
+    return source_partition_records_dir(source_id, partition) / filename
+
+
 def source_release_records_path(
     source_id: str,
     release_id: str,

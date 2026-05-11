@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import sys
 from pathlib import Path
 
@@ -13,73 +12,77 @@ if str(REPO_ROOT) not in sys.path:
 
 def _reload_module(monkeypatch, rag_root: Path):
     monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
-    monkeypatch.setenv("LEGACY_DATA_ROOT", str(rag_root.parent / "data"))
     data_paths = importlib.import_module("services.utils.data_paths")
     importlib.reload(data_paths)
-    lineage = importlib.import_module("services.utils.data_lineage")
-    importlib.reload(lineage)
     module = importlib.import_module("pipelines.etl.processed_frontmatter_to_jsonl")
     return importlib.reload(module)
 
 
-def test_process_directory_builds_records_from_frontmatter_txt(tmp_path, monkeypatch):
+def test_process_file_applies_frontmatter_overrides(monkeypatch, tmp_path):
     rag_root = tmp_path / "rag-data"
     module = _reload_module(monkeypatch, rag_root)
-
-    processed_dir = rag_root / "sources" / "nhs_health_a_z" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    (processed_dir / "acute-pancreatitis.txt").write_text(
+    path = rag_root / "sources" / "nci_pdq" / "processed" / "acupuncture-pdq.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         """---
-source_id: nhs_health_a_z
-title: Pancreatitis (acute)
-item_url: https://www.nhs.uk/conditions/acute-pancreatitis/
+source_id: nci_pdq
+title: Acupuntura (PDQ)
+language: es
+audience: clinician
+doc_type: reference
+specialty: oncology
+trust_tier: 1
+section_title: Summary
+canonical_title: Acupuntura
+published_at: 2026-05-01
 ---
 
-Pancreatitis (acute)
-
-Acute pancreatitis is inflammation of the pancreas that needs urgent care.
-Symptoms include severe tummy pain, vomiting, and fever. Treatment is usually in hospital.
+Acupuntura se usa a veces para tratar síntomas relacionados con el cáncer. Este resumen describe la evidencia clínica y las consideraciones de seguridad para profesionales de la salud.
 """,
         encoding="utf-8",
     )
 
-    output_path = rag_root / "sources" / "nhs_health_a_z" / "records" / "document_records.jsonl"
-    report = module.process_directory(
-        source_id="nhs_health_a_z",
-        source_dir=processed_dir,
-        output_path=output_path,
-    )
+    rec = module.process_file(path, source_id="nci_pdq", etl_run_id="etl-test")
 
-    lines = output_path.read_text(encoding="utf-8").strip().splitlines()
-    record = json.loads(lines[0])
-
-    assert report["records"] == 1
-    assert record["title"] == "Pancreatitis (acute)"
-    assert record["source_url"] == "https://www.nhs.uk/conditions/acute-pancreatitis/"
-    assert record["source_id"] == "nhs_health_a_z"
-    assert record["source_name"] == "NHS Health A-Z"
-    assert record["doc_type"] == "patient_education"
-    assert record["processed_path"].endswith("acute-pancreatitis.txt")
+    assert rec is not None
+    assert rec.language == "es"
+    assert rec.audience == "clinician"
+    assert rec.doc_type == "reference"
+    assert rec.specialty == "oncology"
+    assert rec.trust_tier == 1
+    assert rec.section_title == "Summary"
+    assert rec.canonical_title == "Acupuntura"
+    assert rec.heading_path == "Acupuntura > Summary"
 
 
-def test_process_file_skips_too_short_body(tmp_path, monkeypatch):
+def test_process_file_repairs_nci_pdq_generic_title_and_audience(monkeypatch, tmp_path):
     rag_root = tmp_path / "rag-data"
     module = _reload_module(monkeypatch, rag_root)
-
-    processed_dir = rag_root / "sources" / "msd_manual_consumer" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    short_path = processed_dir / "short.txt"
-    short_path.write_text(
+    path = rag_root / "sources" / "nci_pdq" / "processed" / "acupuncture-pdq.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         """---
-source_id: msd_manual_consumer
-title: Short note
-item_url: https://example.org/short
+source_id: nci_pdq
+title: health professional
+item_url: https://www.cancer.gov/about-cancer/treatment/cam/hp/acupuncture-pdq
+language: en
+audience: clinician
 ---
 
-Too short.
+Acupuncture (PDQÂ®)â€“Health Professional Version
+
+Acupuncture is a complementary therapy used by cancer patients to manage symptoms related to cancer and its treatment.
+This summary describes clinical evidence, symptom management, adverse effects, and implementation considerations for clinicians.
 """,
         encoding="utf-8",
     )
 
-    record = module.process_file(short_path, source_id="msd_manual_consumer", etl_run_id="test")
-    assert record is None
+    rec = module.process_file(path, source_id="nci_pdq", etl_run_id="etl-test")
+
+    assert rec is not None
+    assert rec.title == "Acupuncture (PDQ®)–Health Professional Version"
+    assert rec.canonical_title == "Acupuncture (PDQ®)"
+    assert rec.audience == "clinician"
+    assert rec.language == "en"
+    assert "PDQÂ®" not in rec.title
+    assert rec.body.startswith("Acupuncture is a complementary therapy")

@@ -484,3 +484,53 @@ def test_vmj_frontier_exhausted_rediscovery_expands_issue_urls(tmp_path, monkeyp
         "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/389",
         "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/390",
     ]
+
+
+def test_run_source_repair_missing_assets_only_redownloads_missing_rows(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module = _reload_run_source(monkeypatch, rag_root)
+
+    missing_rel = "sources/who_vietnam/raw/missing.html"
+    manifest_path = rag_root / "sources" / "who_vietnam" / "manifest.csv"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        "source_id,crawl_run_id,item_id,item_type,title_hint,item_url,file_url,parent_item_url,relative_path,extension,mime_type,content_class,http_status,content_length,etag,last_modified,sha256,discovered_at_utc,downloaded_at_utc,duplicate_status,duplicate_of,extract_strategy,extract_status,notes\n"
+        f"who_vietnam,,old1,country_page,Missing Page,https://example.org/missing,,,{missing_rel},.html,text/html,html,200,,,,,2026-05-01T00:00:00Z,2026-05-01T00:00:00Z,,,html_text,missing_asset,\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "_download_bytes",
+        lambda url: (b"<html><body>Recovered</body></html>", {"http_status": "200", "mime_type": "text/html"}),
+    )
+
+    report = module.run_source(
+        source_id="who_vietnam",
+        resume=True,
+        repair_missing_assets=True,
+        repair_only=True,
+    )
+
+    rows = module.read_manifest("who_vietnam")
+    raw_path = rag_root / missing_rel
+
+    assert report["repair_downloaded"] == 1
+    assert report["repair_failed"] == 0
+    assert raw_path.exists()
+    assert len(rows) == 1
+    assert rows[0]["item_url"] == "https://example.org/missing"
+    assert rows[0]["extract_status"] == "pending"
+    assert rows[0]["notes"] == "missing_asset_repaired_in_place"
+
+
+def test_run_source_repair_only_requires_repair_flag(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    module = _reload_run_source(monkeypatch, rag_root)
+
+    try:
+        module.run_source(source_id="who_vietnam", repair_only=True)
+    except ValueError as exc:
+        assert "repair_only requires repair_missing_assets" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for repair_only without repair_missing_assets")

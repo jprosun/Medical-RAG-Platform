@@ -789,16 +789,144 @@ def _crawl_reference_site(
     )
 
 
+def _repair_missing_assets(
+    config: SourceConfig,
+    *,
+    rows: list[dict[str, str]],
+    crawl_run_id: str,
+    max_items: int,
+) -> dict[str, int | str]:
+    def repair_row_in_place(row: dict[str, str], content: bytes, metadata: dict[str, str], downloaded_at: str) -> bool:
+        rel_path = (row.get("relative_path") or "").strip()
+        if not rel_path:
+            return False
+
+        target = (RAG_DATA_ROOT / rel_path).resolve()
+        try:
+            target.relative_to(RAG_DATA_ROOT.resolve())
+        except ValueError:
+            return False
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+        extension = infer_extension(
+            filename=Path(rel_path).name,
+            url=(row.get("file_url") or row.get("item_url") or ""),
+            mime_type=metadata.get("mime_type", ""),
+        )
+        content_class = infer_content_class(extension, metadata.get("mime_type", ""))
+        if config.source_id == "ncbi_bookshelf" and content_class == "html":
+            content_class = "html_book"
+
+        row.update(
+            {
+                "crawl_run_id": crawl_run_id,
+                "extension": extension,
+                "mime_type": metadata.get("mime_type", ""),
+                "content_class": content_class,
+                "http_status": metadata.get("http_status", "200"),
+                "content_length": metadata.get("content_length", str(len(content))),
+                "etag": metadata.get("etag", ""),
+                "last_modified": metadata.get("last_modified", ""),
+                "sha256": file_sha256(target),
+                "downloaded_at_utc": downloaded_at,
+                "duplicate_status": "",
+                "duplicate_of": "",
+                "extract_strategy": default_extract_strategy(content_class),
+                "extract_status": default_extract_status(content_class),
+                "notes": "missing_asset_repaired_in_place",
+            }
+        )
+        return True
+
+    unique_rows: dict[str, dict[str, str]] = {}
+    for row in rows:
+        rel_path = (row.get("relative_path") or "").strip()
+        if rel_path:
+            unique_rows[rel_path] = row
+
+    downloaded = 0
+    skipped = 0
+    failed = 0
+    attempted_keys: set[str] = set()
+    limit = max_items or 0
+
+    for row in unique_rows.values():
+        if (row.get("extract_status") or "").strip() != "missing_asset":
+            continue
+        primary_url = (row.get("file_url") or row.get("item_url") or "").strip()
+        if not primary_url:
+            failed += 1
+            continue
+
+        dedupe_key = make_resume_key(row.get("file_url", ""), row.get("item_url", "")) or primary_url
+        if dedupe_key in attempted_keys:
+            skipped += 1
+            continue
+        attempted_keys.add(dedupe_key)
+
+        discovered_at = utc_now()
+        try:
+            content, metadata = _download_bytes(primary_url)
+        except Exception:
+            failed += 1
+            continue
+
+        downloaded_at = utc_now()
+        if repair_row_in_place(row, content, metadata, downloaded_at):
+            downloaded += 1
+            time.sleep(0.25)
+            if limit and downloaded >= limit:
+                break
+            continue
+
+        filename_hint = Path((row.get("relative_path") or "").strip()).name or _filename_from_url(primary_url, config.source_id)
+        register_url = (row.get("item_url") or "").strip() or primary_url
+        register_file_url = (row.get("file_url") or "").strip()
+        _register_download(
+            source_id=config.source_id,
+            rows=rows,
+            item_type=(row.get("item_type") or config.item_type or "repaired_asset"),
+            title_hint=(row.get("title_hint") or filename_hint),
+            item_url=register_url,
+            file_url=register_file_url,
+            parent_item_url=(row.get("parent_item_url") or "").strip(),
+            filename_hint=filename_hint,
+            content=content,
+            metadata=metadata,
+            crawl_run_id=crawl_run_id,
+            discovered_at=discovered_at,
+            downloaded_at=downloaded_at,
+        )
+        downloaded += 1
+        time.sleep(0.25)
+        if limit and downloaded >= limit:
+            break
+
+    return {
+        "source_id": config.source_id,
+        "mode": config.mode,
+        "repair_downloaded": downloaded,
+        "repair_skipped": skipped,
+        "repair_failed": failed,
+    }
+
+
 def run_source(
     *,
     source_id: str,
     resume: bool = True,
     max_items: int = 0,
+    repair_missing_assets: bool = False,
+    repair_only: bool = False,
 ) -> dict[str, int | str]:
     if source_id not in KNOWN_SOURCE_IDS:
         raise ValueError(f"Unknown source_id: {source_id}")
     if source_id not in SOURCE_REGISTRY:
         raise ValueError(f"Source {source_id} is known but has no crawl config")
+    if repair_only and not repair_missing_assets:
+        raise ValueError("repair_only requires repair_missing_assets=True")
 
     ensure_rag_data_layout([source_id])
     bootstrap_source_manifest(source_id)
@@ -811,6 +939,25 @@ def run_source(
         if repaired:
             write_manifest(source_id, rows)
             build_corpus_catalog()
+
+    repair_report: dict[str, int | str] = {
+        "source_id": source_id,
+        "mode": config.mode,
+        "repair_downloaded": 0,
+        "repair_skipped": 0,
+        "repair_failed": 0,
+    }
+    if repair_missing_assets:
+        repair_report = _repair_missing_assets(
+            config,
+            rows=rows,
+            crawl_run_id=crawl_run_id,
+            max_items=max_items,
+        )
+        write_manifest(source_id, rows)
+        build_corpus_catalog()
+        if repair_only:
+            return repair_report
 
     if config.mode == "medlineplus_xml":
         report = _crawl_medlineplus(config, rows=rows, crawl_run_id=crawl_run_id, resume=resume)
@@ -833,6 +980,13 @@ def run_source(
 
     write_manifest(source_id, rows)
     build_corpus_catalog()
+    if repair_missing_assets:
+        report = {
+            **report,
+            "repair_downloaded": repair_report["repair_downloaded"],
+            "repair_skipped": repair_report["repair_skipped"],
+            "repair_failed": repair_report["repair_failed"],
+        }
     return report
 
 
@@ -841,12 +995,16 @@ def main() -> None:
     parser.add_argument("--source-id", required=True, choices=sorted(SOURCE_REGISTRY))
     parser.add_argument("--resume", action="store_true", default=False)
     parser.add_argument("--max-items", type=int, default=0)
+    parser.add_argument("--repair-missing-assets", action="store_true")
+    parser.add_argument("--repair-only", action="store_true")
     args = parser.parse_args()
 
     report = run_source(
         source_id=args.source_id,
         resume=args.resume,
         max_items=args.max_items,
+        repair_missing_assets=args.repair_missing_assets,
+        repair_only=args.repair_only,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

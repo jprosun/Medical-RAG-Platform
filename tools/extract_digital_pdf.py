@@ -41,12 +41,61 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def _rotate_text_to_title(text: str, title: str, *, min_prefix_chars: int = 200) -> str:
+    title = clean_text(title or "")
+    if not title:
+        return text
+
+    tokens = [re.escape(token) for token in title.split() if token]
+    if len(tokens) < 3:
+        return text
+
+    pattern = re.compile(r"\s+".join(tokens), flags=re.IGNORECASE)
+    match = pattern.search(text)
+    if not match or match.start() <= min_prefix_chars:
+        return text
+
+    prefix = text[: match.start()].strip()
+    suffix = text[match.start() :].strip()
+    if not suffix:
+        return text
+    if not prefix:
+        return suffix
+    return f"{suffix}\n\n{prefix}"
+
+
+def _cleanup_vmj_pdf_text(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^(vietnam medical journal\b.*|tạp chí y học việt nam\b.*)$", stripped, flags=re.IGNORECASE):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+
+    heading_patterns = [
+        r"(TÓM TẮT\d*)",
+        r"(SUMMARY)",
+        r"(ABSTRACT)",
+        r"(I\.\s*ĐẶT VẤN ĐỀ)",
+        r"(I\.\s*INTRODUCTION)",
+        r"(II\.\s*ĐỐI TƯỢNG VÀ PHƯƠNG PHÁP NGHIÊN CỨU)",
+        r"(TÀI LIỆU THAM KHẢO)",
+        r"(Từ khóa:)",
+        r"(Keywords:)",
+    ]
+    for pattern in heading_patterns:
+        text = re.sub(rf"(?<!\n){pattern}", r"\n\n\1", text, flags=re.IGNORECASE)
+
+    return clean_text(text)
+
+
 def extract_pdf(filepath: str | Path) -> tuple[str, int]:
     try:
         doc = fitz.open(filepath)
         pages = []
         for page in doc:
-            text = page.get_text()
+            text = page.get_text("text", sort=True)
             if text.strip():
                 pages.append(text)
         doc.close()
@@ -65,6 +114,9 @@ def write_processed_pdf_text(row: dict[str, str], *, base_dir: Path = BASE_DIR) 
     text, pages = extract_pdf(filepath)
     if not text or text.startswith("[ERROR"):
         return None
+    text = _rotate_text_to_title(text, row.get("title", ""))
+    if source == "vmj_ojs":
+        text = _cleanup_vmj_pdf_text(text)
 
     out_source_dir = source_processed_dir(source)
     out_source_dir.mkdir(parents=True, exist_ok=True)
@@ -159,4 +211,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

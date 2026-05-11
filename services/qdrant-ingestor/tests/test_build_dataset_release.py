@@ -107,3 +107,42 @@ def test_build_dataset_release_collects_processed_files(tmp_path, monkeypatch):
     manifest_rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
     assert manifest_rows[0]["source_id"] == "nhs_health_a_z"
     assert manifest_rows[0]["source_processed_path"] == record["processed_path"]
+
+
+def test_safe_dataset_processed_name_truncates_long_stems(tmp_path, monkeypatch):
+    builder = _reload_builder(monkeypatch, tmp_path / "rag-data")
+    long_name = "rag-data/sources/who_vietnam/processed/" + ("x" * 220) + ".txt"
+
+    safe = builder._safe_dataset_processed_name("who_vietnam", long_name)
+
+    assert safe.startswith("who_vietnam__")
+    assert safe.endswith(".txt")
+    assert len(Path(safe).stem) < 120
+
+
+def test_build_dataset_release_backfills_missing_source_id(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    source = rag_root / "sources" / "who" / "records" / "document_records.jsonl"
+    source.parent.mkdir(parents=True)
+
+    record = _record("who1", "who")
+    record["source_id"] = ""
+    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    builder = _reload_builder(monkeypatch, rag_root)
+
+    builder.build_dataset_release(
+        dataset_id="en_core_v1",
+        source_ids=("who",),
+    )
+
+    output = rag_root / "datasets" / "en_core_v1" / "records" / "document_records.jsonl"
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+    assert rows[0]["source_id"] == "who"
+
+
+def test_resolve_source_ids_none_group_only_uses_explicit_ids(tmp_path, monkeypatch):
+    builder = _reload_builder(monkeypatch, tmp_path / "rag-data")
+
+    assert builder._resolve_source_ids(["who", "medlineplus"], "none") == ("who", "medlineplus")

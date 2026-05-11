@@ -187,3 +187,19 @@ def test_data_proceed_paths(tmp_path, monkeypatch):
     assert module.data_proceed_records_path("nhs_health_a_z") == (
         rag_root / "data_proceed" / "nhs_health_a_z" / "records" / "document_records.jsonl"
     )
+
+
+def test_source_partition_records_paths(tmp_path, monkeypatch):
+    rag_root = tmp_path / "rag-data"
+    legacy_root = tmp_path / "data"
+    monkeypatch.setenv("RAG_DATA_ROOT", str(rag_root))
+    monkeypatch.setenv("LEGACY_DATA_ROOT", str(legacy_root))
+
+    module = _reload_data_paths()
+
+    assert module.source_partition_records_dir("vien_dinh_duong", "article_only") == (
+        rag_root / "sources" / "vien_dinh_duong" / "records" / "article_only"
+    )
+    assert module.source_partition_records_path("vien_dinh_duong", "long_pdf_book_ocr", "ocr_jobs.jsonl") == (
+        rag_root / "sources" / "vien_dinh_duong" / "records" / "long_pdf_book_ocr" / "ocr_jobs.jsonl"
+    )

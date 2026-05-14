@@ -232,16 +232,45 @@ def _score_direct_answer_sentence(
 
     if asks_numeric and _DIRECT_NUMERIC_RE.search(sentence):
         score += 2.0
-    if "karnofsky" in _normalize_text(query) and "karnofsky" in sentence_norm:
+    query_norm = _normalize_text(query)
+    if "karnofsky" in query_norm and "karnofsky" in sentence_norm:
         score += 3.0
-    if "duy tri" in _normalize_text(query) and "duy tri" in sentence_norm:
+    if "duy tri" in query_norm and "duy tri" in sentence_norm:
         score += 1.5
-    if "pho bien nhat" in _normalize_text(query) and "pho bien nhat" in sentence_norm:
+    if "pho bien nhat" in query_norm and "pho bien nhat" in sentence_norm:
         score += 2.0
+    asks_study_design = any(
+        marker in query_norm
+        for marker in (
+            "thiet ke", "doi tuong", "phuong phap", "co mau", "chon mau",
+            "study design", "sample size", "materials and methods", "methods",
+        )
+    )
+    if asks_study_design and any(
+        marker in sentence_norm
+        for marker in (
+            "mo ta cat ngang", "nghien cuu mo ta", "tien cuu", "hoi cuu",
+            "chon mau", "co mau", "phuong phap chon mau", "cross-sectional",
+            "cohort", "case control", "thu nghiem", "ngau nhien",
+        )
+    ):
+        score += 3.0
 
     section_norm = _normalize_text(section_title)
     if any(marker in section_norm for marker in ("ket qua", "kết quả", "ket luan", "kết luận", "tom tat", "tóm tắt")):
         score += 0.8
+    if asks_study_design and any(
+        marker in section_norm
+        for marker in (
+            "doi tuong",
+            "phuong phap",
+            "doi tuong va phuong phap",
+            "materials and methods",
+            "methods",
+            "subjects and methods",
+        )
+    ):
+        score += 2.2
     return score
 
 

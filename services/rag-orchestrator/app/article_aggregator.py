@@ -57,12 +57,23 @@ def _is_weak_title(title: str) -> bool:
 
 
 def _article_group_key(chunk: RetrievedChunk) -> str:
-    """Prefer stable doc_id over brittle title fragments."""
+    """Prefer stable doc_id, but merge known legacy split-article shards."""
+    raw_title = chunk.metadata.get("title", "") or ""
+    tn = title_norm(raw_title)
+    source_url = str(chunk.metadata.get("source_url", "") or "").strip()
+    source_name = title_norm(str(chunk.metadata.get("source_name", "") or ""))
+    article_id = str(chunk.metadata.get("article_id", "") or "").strip()
+    if article_id:
+        return f"article:{article_id}"
+
+    if tn and not _is_weak_title(raw_title) and "/issue/view/" in source_url:
+        if source_name:
+            return f"legacy-title:{source_name}:{tn}"
+        return f"legacy-title:{tn}"
+
     doc_id = str(chunk.metadata.get("doc_id", "") or "").strip()
     if doc_id:
         return f"doc:{doc_id}"
-    raw_title = chunk.metadata.get("title", "") or ""
-    tn = title_norm(raw_title)
     if tn:
         return f"title:{tn}"
     return f"_unknown_{chunk.id[:8]}"
@@ -92,6 +103,9 @@ def _metadata_text(article: "ArticleGroup") -> str:
         parts.append(md.get("title", "") or "")
         parts.append(md.get("section_title", "") or "")
         parts.append(md.get("heading_path", "") or "")
+        parts.append(md.get("canonical_title", "") or "")
+        parts.append(md.get("source_id", "") or "")
+        parts.append(md.get("institution", "") or "")
     return " ".join(p for p in parts if p)
 
 
@@ -155,9 +169,57 @@ _VN_STOPS.update(
         "hay",
     }
 )
+_VN_STOPS.update(
+    {
+        "nghien",
+        "cuu",
+        "danh",
+        "gia",
+        "benh",
+        "nhan",
+        "ket",
+        "qua",
+        "dac",
+        "diem",
+        "hieu",
+        "tap",
+        "trung",
+        "nhieu",
+        "nao",
+        "nay",
+    }
+)
 
 
 _ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,6}\b")
+_QUERY_CUTOFF_MARKERS = (
+    " tap trung",
+    " nghien cuu",
+    " danh gia",
+    " su dung",
+    " de ",
+    " nhung ",
+    " ket qua",
+    " hieu qua",
+)
+_IDENTITY_GENERIC_TERMS = {
+    "nghien",
+    "cuu",
+    "danh",
+    "gia",
+    "benh",
+    "nhan",
+    "ket",
+    "qua",
+    "dac",
+    "diem",
+    "hieu",
+    "nay",
+    "nao",
+    "nhung",
+    "tap",
+    "trung",
+}
 
 
 def _extract_query_acronyms(text: str) -> set[str]:
@@ -168,6 +230,40 @@ def _extract_query_acronyms(text: str) -> set[str]:
 def _count_acronym_matches(text: str, acronyms: set[str]) -> int:
     haystack = title_norm(text)
     return sum(1 for acronym in acronyms if re.search(rf"\b{re.escape(acronym)}\b", haystack))
+
+
+def _extract_institution_phrases(text: str) -> list[str]:
+    query_norm = title_norm(text)
+    phrases: list[str] = []
+    for pattern in (
+        r"benh vien [a-z0-9 ]{4,80}",
+        r"truong dai hoc [a-z0-9 ]{4,80}",
+        r"dai hoc y(?: khoa| duoc)? [a-z0-9 ]{2,80}",
+    ):
+        for match in re.finditer(pattern, query_norm):
+            phrase = match.group(0).strip()
+            for marker in _QUERY_CUTOFF_MARKERS:
+                if marker in phrase:
+                    phrase = phrase.split(marker, 1)[0].strip()
+            phrase = re.sub(r"\s+", " ", phrase).strip(" ,.;:-")
+            if len(phrase.split()) >= 3 and phrase not in phrases:
+                phrases.append(phrase)
+    return phrases[:4]
+
+
+def _extract_focus_phrases(text: str) -> list[str]:
+    tokens = [
+        tok
+        for tok in title_norm(text).split()
+        if len(tok) >= 3 and tok not in _VN_STOPS and tok not in _IDENTITY_GENERIC_TERMS
+    ]
+    phrases: list[str] = []
+    for size in (5, 4, 3, 2):
+        for i in range(len(tokens) - size + 1):
+            phrase = " ".join(tokens[i:i + size]).strip()
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+    return phrases[:12]
 
 
 def _query_alignment(article: "ArticleGroup", query: str) -> tuple[float, int, float]:
@@ -213,6 +309,33 @@ def _query_support_terms(article: "ArticleGroup", query: str) -> set[str]:
     return query_kw & article_kw
 
 
+def _article_identity_bonus(article: "ArticleGroup", query: str) -> float:
+    support_norm = title_norm(_article_support_text(article))
+    title_only_norm = title_norm(article.title)
+    bonus = 0.0
+
+    institution_phrases = _extract_institution_phrases(query)
+    if institution_phrases:
+        matched_institution = False
+        for phrase in institution_phrases:
+            if phrase in support_norm:
+                matched_institution = True
+                bonus += 0.24
+                if phrase in title_only_norm:
+                    bonus += 0.10
+        if not matched_institution:
+            bonus -= 0.24
+
+    focus_phrases = _extract_focus_phrases(query)
+    for phrase in focus_phrases:
+        if phrase in title_only_norm:
+            bonus += 0.12 if len(phrase.split()) >= 3 else 0.08
+        elif phrase in support_norm:
+            bonus += 0.08 if len(phrase.split()) >= 3 else 0.05
+
+    return min(round(bonus, 4), 0.42)
+
+
 # ── Data structures ──────────────────────────────────────────────────
 
 @dataclass
@@ -230,6 +353,10 @@ class ArticleGroup:
     authority_score: float = 0.0
     query_fit_score: float = 0.0
     selected_reason: str = ""
+    query_kw_score: float = 0.0
+    query_specific_overlap: int = 0
+    query_acronym_coverage: float = 0.0
+    support_term_count: int = 0
 
 
 @dataclass
@@ -280,6 +407,11 @@ _DOC_TYPE_BOOST = {
     "guideline": 0.06,
     "textbook": 0.04,
     "reference": 0.04,
+    "research_article": 0.04,
+    "journal_article": 0.04,
+    "original_research": 0.05,
+    "case_report": 0.03,
+    "meta_analysis": 0.05,
     "review": 0.02,
     "patient_education": 0.0,
 }
@@ -288,11 +420,52 @@ _DOC_TYPE_BOOST = {
 _QUERY_TYPE_FIT = {
     "guideline_comparison":    {"guideline": 0.05, "reference": 0.02},
     "teaching_explainer":      {"textbook": 0.05, "reference": 0.04, "guideline": 0.02},
-    "study_result_extraction":  {"review": 0.05},
-    "research_appraisal":      {"review": 0.05},
-    "comparative_synthesis":   {"review": 0.04, "guideline": 0.03},
+    "professional_explainer":  {"textbook": 0.04, "reference": 0.04, "guideline": 0.03, "research_article": 0.02},
+    "study_result_extraction":  {"research_article": 0.06, "journal_article": 0.05, "original_research": 0.06, "review": 0.03},
+    "research_appraisal":      {"research_article": 0.06, "journal_article": 0.05, "original_research": 0.06, "review": 0.03},
+    "comparative_synthesis":   {"research_article": 0.04, "journal_article": 0.04, "review": 0.04, "guideline": 0.03},
     "fact_extraction":         {"guideline": 0.03, "textbook": 0.03, "patient_education": 0.02},
 }
+
+
+def _looks_like_journal_source(md: dict) -> bool:
+    doc_type = str(md.get("doc_type", "") or "").lower()
+    if doc_type in {"journal_article", "research_article", "original_research", "case_report", "meta_analysis", "review"}:
+        return True
+    source_name = title_norm(str(md.get("source_name", "") or ""))
+    title = title_norm(str(md.get("title", "") or ""))
+    journal_markers = ("journal", "tap chi", "vmj", "y hoc", "nghien cuu")
+    return any(marker in source_name or marker in title for marker in journal_markers)
+
+
+def _source_query_fit_boost(md: dict, router_output: Optional["RouterOutput"]) -> float:
+    if not router_output:
+        return 0.0
+
+    query_type = getattr(router_output, "query_type", "")
+    retrieval_mode = getattr(router_output, "retrieval_mode", "")
+    doc_type = str(md.get("doc_type", "") or "").lower()
+    source_name = title_norm(str(md.get("source_name", "") or ""))
+
+    bonus = 0.0
+    if query_type in {"study_result_extraction", "research_appraisal"}:
+        if _looks_like_journal_source(md):
+            bonus += 0.04
+        if doc_type == "patient_education":
+            bonus -= 0.04
+    elif query_type == "comparative_synthesis" and retrieval_mode == "article_centric":
+        if _looks_like_journal_source(md):
+            bonus += 0.03
+        if doc_type == "patient_education":
+            bonus -= 0.03
+    elif query_type in {"teaching_explainer", "professional_explainer"}:
+        if doc_type in {"textbook", "reference"}:
+            bonus += 0.03
+    elif query_type == "guideline_comparison":
+        if any(marker in source_name for marker in ("who", "cdc", "nhs", "uspstf", "nice")):
+            bonus += 0.02
+
+    return bonus
 
 
 def _get_article_metadata(article: ArticleGroup) -> dict:
@@ -325,13 +498,22 @@ def _compute_article_score(
     numeric_density = min(numeric_chunks / max(article.chunk_count, 1), 1.0)
 
     kw_score, specific_overlap, acronym_coverage = _query_alignment(article, query)
+    query_keywords = _extract_keywords(query)
+    support_terms = _query_support_terms(article, query)
+    support_term_count = len(support_terms)
+    support_ratio = min(support_term_count / max(len(query_keywords), 1), 1.0)
     title_penalty = 0.08 if _is_weak_title(article.title) else 0.0
+    identity_bonus = _article_identity_bonus(article, query)
     specificity_boost = min(specific_overlap * 0.03, 0.12)
     acronym_boost = 0.16 * acronym_coverage
     acronym_miss_penalty = 0.0
+    support_boost = 0.12 * support_ratio
+    support_miss_penalty = 0.0
     query_acronyms = _extract_query_acronyms(query)
     if query_acronyms:
         acronym_miss_penalty = 0.16 * (1.0 - acronym_coverage)
+    if len(query_keywords) >= 2 and support_term_count == 0:
+        support_miss_penalty = 0.14
 
     relevance = (
         0.35 * article.max_score
@@ -342,6 +524,8 @@ def _compute_article_score(
         + specificity_boost
         + acronym_boost
         - acronym_miss_penalty
+        + support_boost
+        - support_miss_penalty
     )
 
     # ── Authority signals (NEW v2) ───────────────────────────────
@@ -364,14 +548,19 @@ def _compute_article_score(
     if router_output is not None:
         fit_map = _QUERY_TYPE_FIT.get(router_output.query_type, {})
         query_fit = fit_map.get(doc_type, 0.0)
+        query_fit += _source_query_fit_boost(md, router_output)
 
     # ── Composite ────────────────────────────────────────────────
-    score = relevance + authority + query_fit - title_penalty
+    score = relevance + authority + query_fit + identity_bonus - title_penalty
 
     # Store sub-scores for transparency
     article.relevance_score = round(relevance, 4)
     article.authority_score = round(authority, 4)
     article.query_fit_score = round(query_fit, 4)
+    article.query_kw_score = round(kw_score, 4)
+    article.query_specific_overlap = specific_overlap
+    article.query_acronym_coverage = round(acronym_coverage, 4)
+    article.support_term_count = support_term_count
 
     return round(score, 4)
 
@@ -404,6 +593,8 @@ def _build_selected_reason(
         parts.append(f"authority=+{article.authority_score}")
     if article.query_fit_score > 0:
         parts.append(f"query_fit=+{article.query_fit_score}")
+    if article.support_term_count:
+        parts.append(f"support_terms={article.support_term_count}")
 
     return "; ".join(parts)
 
@@ -476,7 +667,20 @@ def _same_article_as_primary(article: ArticleGroup, primary: ArticleGroup) -> bo
         for chunk in primary.chunks
         if str(chunk.metadata.get("doc_id", "") or "").strip()
     }
-    return bool(article_doc_ids and primary_doc_ids and article_doc_ids == primary_doc_ids)
+    if article_doc_ids and primary_doc_ids and article_doc_ids == primary_doc_ids:
+        return True
+
+    article_ids = {
+        str(chunk.metadata.get("article_id", "") or "").strip()
+        for chunk in article.chunks
+        if str(chunk.metadata.get("article_id", "") or "").strip()
+    }
+    primary_article_ids = {
+        str(chunk.metadata.get("article_id", "") or "").strip()
+        for chunk in primary.chunks
+        if str(chunk.metadata.get("article_id", "") or "").strip()
+    }
+    return bool(article_ids and primary_article_ids and article_ids == primary_article_ids)
 
 
 def _select_primary_article(
@@ -493,6 +697,17 @@ def _select_primary_article(
 
     anchor = max(articles, key=lambda a: (a.max_score, a.chunk_count, a.avg_score))
     if anchor is primary:
+        return primary, "anchor"
+    if anchor.support_term_count == 0 and primary.support_term_count > 0:
+        return primary, "composite"
+    if anchor.query_acronym_coverage == 0.0 and primary.query_acronym_coverage > 0.0:
+        return primary, "composite"
+    if anchor.query_kw_score < 0.12 and primary.query_kw_score >= 0.2:
+        return primary, "composite"
+    if (
+        primary.article_score - anchor.article_score >= 0.06
+        and primary.support_term_count > anchor.support_term_count
+    ):
         return primary, "composite"
     return anchor, "anchor"
 

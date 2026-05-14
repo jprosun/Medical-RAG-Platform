@@ -30,6 +30,7 @@ class RouterOutput:
     retrieval_profile: str    # light | standard | deep
     needs_extractor: bool     # whether to run Evidence Extractor
     retrieval_mode: str       # article_centric | topic_summary | mechanistic_synthesis
+    answer_policy: str = "strict_rag"  # strict_rag | open_enriched
 
 
 def _strip_diacritics(text: str) -> str:
@@ -260,6 +261,20 @@ def _has_summary_request(text_lower: str) -> bool:
     return any(marker in padded or marker in padded_stripped for marker in markers)
 
 
+def _has_professional_explainer_intent(text_lower: str) -> bool:
+    text_stripped = _strip_diacritics(text_lower)
+    padded = f" {text_lower} "
+    padded_stripped = f" {text_stripped} "
+    markers = (
+        " là gì ", " la gi ", " định nghĩa ", " dinh nghia ",
+        " giải thích ", " giai thich ", " vì sao ", " vi sao ",
+        " tại sao ", " tai sao ", " cơ chế ", " co che ",
+        " bệnh sinh ", " benh sinh ", " ý nghĩa lâm sàng ", " y nghia lam sang ",
+        " tổng quan ", " tong quan ",
+    )
+    return any(marker in padded or marker in padded_stripped for marker in markers)
+
+
 def _infer_answer_style(
     query_lower: str,
     best_type: str,
@@ -276,7 +291,7 @@ def _infer_answer_style(
         if direct_fact_question or _asks_for_numeric_value(query_lower):
             return "exact"
         return "summary" if single_document_question else "exact"
-    if best_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer"}:
+    if best_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer", "professional_explainer"}:
         return "summary"
     return "summary"
 
@@ -326,7 +341,16 @@ def route_query(query: str) -> RouterOutput:
     single_document_question = _looks_single_document_question(q)
     direct_fact_question = _has_direct_fact_question(q)
 
-    if explicit_comparison:
+    if (
+        not single_document_question
+        and not _asks_for_numeric_value(q)
+        and _has_professional_explainer_intent(q)
+        and scores["guideline_comparison"] == 0
+        and scores["comparative_synthesis"] == 0
+    ):
+        best_type = "professional_explainer"
+        best_score = max(scores["teaching_explainer"], scores["fact_extraction"], 1)
+    elif explicit_comparison:
         best_type = (
             "guideline_comparison"
             if scores["guideline_comparison"] > 0
@@ -425,6 +449,16 @@ def route_query(query: str) -> RouterOutput:
             "needs_extractor": False,
             "retrieval_mode": "mechanistic_synthesis",
         },
+        "professional_explainer": {
+            "depth": "medium",
+            "requires_numbers": False,
+            "requires_limitations": False,
+            "requires_comparison": False,
+            "answer_style": "summary",
+            "retrieval_profile": "standard",
+            "needs_extractor": True,
+            "retrieval_mode": "mechanistic_synthesis",
+        },
     }
 
     config = dict(_TYPE_CONFIG[best_type])
@@ -432,7 +466,7 @@ def route_query(query: str) -> RouterOutput:
     if best_type == "comparative_synthesis" and single_document_question:
         config["retrieval_mode"] = "article_centric"
         config["retrieval_profile"] = "standard"
-    if answer_style in {"exact", "summary", "bounded_partial"} and best_type != "research_appraisal":
+    if answer_style in {"exact", "summary", "bounded_partial"} and best_type not in {"research_appraisal", "professional_explainer"}:
         config["needs_extractor"] = False
     if answer_style == "exact" and not _asks_for_numeric_value(q):
         config["requires_numbers"] = False
@@ -449,4 +483,5 @@ def route_query(query: str) -> RouterOutput:
         retrieval_profile=config["retrieval_profile"],
         needs_extractor=config["needs_extractor"],
         retrieval_mode=config["retrieval_mode"],
+        answer_policy="open_enriched" if best_type == "professional_explainer" else "strict_rag",
     )

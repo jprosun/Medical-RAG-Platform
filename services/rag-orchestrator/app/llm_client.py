@@ -52,6 +52,70 @@ class KServeClient:
         self.retries = retries
         self.retry_backoff_s = retry_backoff_s
 
+    def _is_deepseek(self) -> bool:
+        provider_hint = (os.getenv("LLM_PROVIDER_HINT") or "").strip().lower()
+        if provider_hint == "deepseek":
+            return True
+        if "api.deepseek.com" in self.base_url.lower():
+            return True
+        return self.model_id.startswith("deepseek-")
+
+    def _build_payload(
+        self,
+        messages: str | list,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict:
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": float(os.getenv("LLM_TOP_P", "0.9")),
+            "frequency_penalty": float(os.getenv("LLM_FREQUENCY_PENALTY", "0.2")),
+            "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "0.0")),
+        }
+
+        if self._is_deepseek():
+            thinking_mode = (os.getenv("LLM_THINKING_MODE") or "").strip().lower()
+            if thinking_mode in {"enabled", "disabled"}:
+                payload["thinking"] = {"type": thinking_mode}
+
+            reasoning_effort = (os.getenv("LLM_REASONING_EFFORT") or "").strip().lower()
+            if reasoning_effort and thinking_mode == "enabled":
+                payload["reasoning_effort"] = reasoning_effort
+
+        return payload
+
+    @staticmethod
+    def _extract_choice_text(choice: dict) -> str:
+        if not isinstance(choice, dict):
+            return ""
+
+        msg = choice.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "").lower()
+                    if item_type in {"text", "output_text"}:
+                        text = item.get("text") or item.get("content") or ""
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                if parts:
+                    return "\n".join(parts).strip()
+
+        text = choice.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+        return ""
+
     def generate(
         self,
         prompt_or_messages: str | list,
@@ -67,15 +131,7 @@ class KServeClient:
 
         messages = prompt_or_messages if isinstance(prompt_or_messages, list) else [{"role": "user", "content": prompt_or_messages}]
 
-        payload = {
-            "model": self.model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": float(os.getenv("LLM_TOP_P", "0.9")),
-            "frequency_penalty": float(os.getenv("LLM_FREQUENCY_PENALTY", "0.2")),
-            "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "0.0")),
-        }
+        payload = self._build_payload(messages, max_tokens, temperature)
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -129,8 +185,8 @@ class KServeClient:
 
                 choices = data.get("choices")
                 if isinstance(choices, list) and choices:
-                    msg = choices[0].get("message")
-                    if msg and msg.get("content"):
+                    answer_text = self._extract_choice_text(choices[0])
+                    if answer_text:
 
                         # Token usage
                         usage = data.get("usage") or {}
@@ -147,10 +203,11 @@ class KServeClient:
                         if completion_tokens:
                             LLM_COMPLETION_TOKENS_TOTAL.labels(model=self.model_id).inc(completion_tokens)
 
-                        return msg["content"].strip()
+                        return answer_text
 
-                # Defensive fallback
-                return json.dumps(data)
+                    raise RuntimeError("LLM returned no assistant content")
+
+                raise RuntimeError("LLM response missing usable choices/content")
 
             except Exception as e:
                 LLM_REQUESTS_TOTAL.labels(

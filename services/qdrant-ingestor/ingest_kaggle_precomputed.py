@@ -32,10 +32,10 @@ from services.utils.data_paths import (  # noqa: E402
 
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION = os.getenv("QDRANT_COLLECTION", "staging_medqa_vi_vmj_v2")
+COLLECTION = os.getenv("QDRANT_COLLECTION", "medqa_release_v3_all_bge_m3")
 VECTOR_DIM = 1024
 BATCH_SIZE = 256
-EMBED_DATASET_ID = os.getenv("EMBED_DATASET_ID", "")
+EMBED_DATASET_ID = os.getenv("EMBED_DATASET_ID", "medqa_release_v3_all_open_enriched")
 KAGGLE_PROFILE = os.getenv("KAGGLE_PROFILE", "multilingual")
 QDRANT_RECREATE_COLLECTION = os.getenv("QDRANT_RECREATE_COLLECTION", "")
 QDRANT_CONNECT_RETRIES = int(os.getenv("QDRANT_CONNECT_RETRIES", "30"))
@@ -131,7 +131,7 @@ def main() -> None:
     ids_path = IDS_FILE
 
     print(f"\n[1/5] Loading embeddings from {embed_path}...")
-    embeddings = np.load(embed_path)
+    embeddings = np.load(embed_path, mmap_mode="r")
     print(f"  Shape: {embeddings.shape}, dtype: {embeddings.dtype}")
 
     print(f"\n[2/5] Loading chunk IDs from {ids_path}...")

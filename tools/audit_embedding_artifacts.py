@@ -19,6 +19,7 @@ from services.utils.data_paths import (
     chunk_texts_export_path,
     embedding_ids_path,
     embedding_vectors_path,
+    kaggle_embedding_input_path,
     migration_audit_path,
 )
 
@@ -46,6 +47,47 @@ def _load_jsonl_ids(path: Path, *, field: str = "id") -> tuple[list[str], int]:
     return ids, invalid
 
 
+def _audit_kaggle_input(path: Path) -> tuple[list[str], int, int, dict[str, int]]:
+    ids: list[str] = []
+    invalid = 0
+    empty_texts = 0
+    required = (
+        "doc_id",
+        "article_id",
+        "title",
+        "canonical_title",
+        "source_id",
+        "source_name",
+        "doc_type",
+        "specialty",
+        "chunk_index",
+        "section_title",
+    )
+    missing = {key: 0 for key in required}
+    if not path.exists():
+        return ids, invalid, empty_texts, missing
+
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                invalid += 1
+                continue
+            ids.append(str(record.get("id", "")))
+            if not str(record.get("text", "")).strip():
+                empty_texts += 1
+            metadata = record.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            for key in required:
+                if metadata.get(key) in (None, ""):
+                    missing[key] += 1
+    return ids, invalid, empty_texts, missing
+
+
 def _dupe_count(ids: list[str]) -> int:
     return len(ids) - len(set(ids))
 
@@ -68,6 +110,7 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
     vectors_path = embedding_vectors_path(dataset_id=dataset_id, profile=profile)
     metadata_path = chunk_metadata_export_path(dataset_id=dataset_id, profile=profile)
     texts_path = chunk_texts_export_path(dataset_id=dataset_id, profile=profile)
+    kaggle_input_path = kaggle_embedding_input_path(dataset_id=dataset_id, profile=profile)
 
     chunk_ids: list[str] = []
     ids_error = ""
@@ -79,6 +122,7 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
 
     metadata_ids, metadata_invalid = _load_jsonl_ids(metadata_path)
     text_ids, text_invalid = _load_jsonl_ids(texts_path)
+    kaggle_ids, kaggle_invalid, kaggle_empty_texts, kaggle_missing_metadata = _audit_kaggle_input(kaggle_input_path)
 
     vector_shape: list[int] | None = None
     vector_dtype = ""
@@ -111,6 +155,11 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
         "no_duplicate_ids": _dupe_count(chunk_ids) == 0,
         "no_duplicate_metadata_ids": _dupe_count(metadata_ids) == 0,
         "no_duplicate_text_ids": _dupe_count(text_ids) == 0,
+        "kaggle_input_loaded": bool(kaggle_ids) and kaggle_invalid == 0,
+        "kaggle_input_order_matches_texts": bool(kaggle_ids) and kaggle_ids == text_ids,
+        "kaggle_input_order_matches_metadata": bool(kaggle_ids) and kaggle_ids == metadata_ids,
+        "kaggle_input_has_no_empty_texts": kaggle_empty_texts == 0,
+        "kaggle_input_no_duplicate_ids": _dupe_count(kaggle_ids) == 0,
     }
     status = "pass" if all(checks.values()) else "fail"
 
@@ -124,17 +173,22 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
             "vectors": _summarize_file(vectors_path),
             "metadata": _summarize_file(metadata_path),
             "texts": _summarize_file(texts_path),
+            "kaggle_embedding_input": _summarize_file(kaggle_input_path),
         },
         "counts": {
             "chunk_ids": len(chunk_ids),
             "vectors": vector_count,
             "metadata": len(metadata_ids),
             "texts": len(text_ids),
+            "kaggle_input": len(kaggle_ids),
             "duplicate_chunk_ids": _dupe_count(chunk_ids),
             "duplicate_metadata_ids": _dupe_count(metadata_ids),
             "duplicate_text_ids": _dupe_count(text_ids),
+            "duplicate_kaggle_input_ids": _dupe_count(kaggle_ids),
             "metadata_invalid_json_lines": metadata_invalid,
             "text_invalid_json_lines": text_invalid,
+            "kaggle_input_invalid_json_lines": kaggle_invalid,
+            "kaggle_input_empty_texts": kaggle_empty_texts,
         },
         "vector_shape": vector_shape,
         "vector_dtype": vector_dtype,
@@ -143,6 +197,7 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
             "vectors": vector_error,
         },
         "checks": checks,
+        "kaggle_missing_metadata": kaggle_missing_metadata,
         "samples": {
             "missing_metadata_for_ids": sorted(chunk_id_set - metadata_set)[:20],
             "extra_metadata_not_in_ids": sorted(metadata_set - chunk_id_set)[:20],

@@ -34,27 +34,27 @@ _SOURCE_DEFAULTS: dict[str, dict] = {
         "trust_tier": 1,
     },
     "vmj_ojs": {
-        "doc_type": "review",
+        "doc_type": "research_article",
         "audience": "clinician",
         "trust_tier": 2,
     },
     "hue_jmp_ojs": {
-        "doc_type": "review",
+        "doc_type": "research_article",
         "audience": "clinician",
         "trust_tier": 2,
     },
     "mil_med_pharm_journal": {
-        "doc_type": "review",
+        "doc_type": "research_article",
         "audience": "clinician",
         "trust_tier": 2,
     },
     "cantho_med_journal": {
-        "doc_type": "review",
+        "doc_type": "research_article",
         "audience": "clinician",
         "trust_tier": 2,
     },
     "trad_med_pharm_journal": {
-        "doc_type": "review",
+        "doc_type": "research_article",
         "audience": "clinician",
         "trust_tier": 2,
     },
@@ -93,14 +93,28 @@ def enrich(
 
     # --- doc_type ---
     doc_type = defaults["doc_type"]
-    body_lower = body[:2000].lower() if body else ""
+    title_lower = (title or "").lower()
+    body_lower = body[:4000].lower() if body else ""
     if "hướng dẫn chẩn đoán và điều trị" in body_lower:
         doc_type = "guideline"
     elif "hướng dẫn quy trình kỹ thuật" in body_lower:
         doc_type = "guideline"
+    elif any(marker in title_lower or marker in body_lower[:1200] for marker in (
+        "báo cáo ca", "bao cao ca", "trường hợp lâm sàng", "truong hop lam sang",
+        "case report", "ca lâm sàng", "ca lam sang",
+    )):
+        doc_type = "case_report"
+    elif any(marker in title_lower for marker in (
+        "tổng quan", "tong quan", "cập nhật", "cap nhat", "review",
+        "meta-analysis", "phân tích gộp", "phan tich gop",
+    )):
+        if any(marker in title_lower for marker in ("meta-analysis", "phân tích gộp", "phan tich gop")):
+            doc_type = "meta_analysis"
+        else:
+            doc_type = "review"
 
     # --- specialty ---
-    body_preview = body[:500] if body else ""
+    body_preview = body[:2000] if body else ""
     specialty = detect_specialty(title, body_preview)
 
     # Override specialty for specific sources

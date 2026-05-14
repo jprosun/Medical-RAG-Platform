@@ -14,7 +14,19 @@ from typing import Any, Dict, Iterator, List, Optional
 
 
 VALID_DOC_TYPES = frozenset(
-    {"guideline", "textbook", "faq", "patient_education", "review", "reference"}
+    {
+        "guideline",
+        "textbook",
+        "faq",
+        "patient_education",
+        "review",
+        "reference",
+        "research_article",
+        "journal_article",
+        "original_research",
+        "case_report",
+        "meta_analysis",
+    }
 )
 VALID_AUDIENCES = frozenset({"patient", "student", "clinician"})
 VALID_TRUST_TIERS = frozenset({1, 2, 3})
@@ -33,6 +45,8 @@ class DocumentRecord:
     source_url: str = ""
     source_id: str = ""
     source_file: str = ""
+    article_id: str = ""
+    institution: str = ""
     raw_path: str = ""
     processed_path: str = ""
     intermediate_path: str = ""

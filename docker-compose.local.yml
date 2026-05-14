@@ -25,21 +25,26 @@ services:
       dockerfile: services/rag-orchestrator/Dockerfile
     environment:
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
+      QDRANT_COLLECTION: medqa_release_v3_all_bge_m3
       EMBEDDING_MODEL: BAAI/bge-m3
-      RAG_TOP_K: "7"
-      RAG_MIN_SCORE: "0.45"
-      RAG_MAX_CONTEXT_TOKENS: "2000"
+      RAG_TOP_K: "14"
+      RAG_MIN_SCORE: "0.35"
+      RAG_MAX_CONTEXT_TOKENS: "6000"
+      RAG_MAX_RETRIEVAL_CANDIDATE_TOKENS: "16000"
+      RAG_ENABLE_HYBRID: "true"
+      RAG_ARTICLE_INDEX_PATH: /rag-data/embeddings/exports/medqa_release_v3_all_open_enriched/multilingual/kaggle_embedding_input.jsonl
       REDIS_URL: redis://redis:6379/0
       KSERVE_ENABLED: "true"
-      KSERVE_BASE_URL: https://openrouter.ai/api
-      KSERVE_COMPLETIONS_PATH: /v1/chat/completions
-      LLM_MODEL_ID: meta-llama/llama-3.3-70b-instruct
-      LLM_API_KEY: ${OPEN_ROUTER_API_KEY:-}
+      KSERVE_BASE_URL: https://api.deepseek.com
+      KSERVE_COMPLETIONS_PATH: /chat/completions
+      LLM_MODEL_ID: deepseek-v4-flash
+      LLM_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LLM_PROVIDER_HINT: deepseek
+      LLM_THINKING_MODE: disabled
       LLM_HTTP_REFERER: http://localhost:8501
       LLM_APP_NAME: llm-medqa-assistant
-      LLM_MAX_TOKENS: "2048"
-      LLM_TEMPERATURE: "0.3"
+      LLM_MAX_TOKENS: "4096"
+      LLM_TEMPERATURE: "0.2"
       LLM_TOP_P: "0.9"
       LLM_FREQUENCY_PENALTY: "0.6"
       LLM_PRESENCE_PENALTY: "0.4"
@@ -47,11 +52,17 @@ services:
       LLM_RETRIES: "1"
       ASYNC_LLM_TITLE_ENABLED: "false"
       LLM_REWRITER_ENABLED: "false"
-      LLM_EXTRACTOR_ENABLED: "false"
+      LLM_EXTRACTOR_ENABLED: "true"
+      LLM_ANSWER_PLANNER_ENABLED: "false"
+      LLM_VERIFIER_ENABLED: "true"
+      EXTERNAL_SEARCH_ENABLED: "false"
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       ALLOW_RATE_LIMIT_FALLBACK: "false"
       OTEL_SDK_DISABLED: "true"
     ports:
       - "8000:8000"
+    volumes:
+      - ./rag-data:/rag-data:ro
     depends_on:
       - qdrant
       - redis
@@ -106,9 +117,9 @@ services:
       - services/qdrant-ingestor/ingest_kaggle_precomputed.py
     environment:
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: staging_medqa_vi_vmj_v2
+      QDRANT_COLLECTION: medqa_release_v3_all_bge_m3
       RAG_DATA_ROOT: /rag-data
-      EMBED_DATASET_ID: vmj_ojs_release_v2
+      EMBED_DATASET_ID: medqa_release_v3_all_open_enriched
       KAGGLE_PROFILE: multilingual
       QDRANT_RECREATE_COLLECTION: "false"
       OTEL_SDK_DISABLED: "true"

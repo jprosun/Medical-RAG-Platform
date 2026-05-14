@@ -282,6 +282,144 @@ def ingest_local_path(
 
 
 # ── Enriched JSONL ingestion ─────────────────────────────────────────
+def iter_enriched_jsonl_chunks(
+    input_path: str,
+    patterns: List[str],
+    chunk_size: int,
+    overlap: int,
+    min_quality_status: str = "hold",
+) -> Iterable[Chunk]:
+    """
+    Streaming variant of enriched JSONL ingestion.
+
+    This keeps the exact chunking/metadata rules used by `ingest_enriched_jsonl`
+    but yields chunks one by one, which is necessary for large release exports.
+    """
+    jsonl_patterns = [p for p in patterns if p.lower().endswith(".jsonl")] or ["*.jsonl"]
+    jsonl_files = list(iter_local_files(input_path, jsonl_patterns))
+    if not jsonl_files:
+        raise SystemExit(f"No .jsonl files found in {input_path}")
+
+    seen_ids: set = set()
+    errors: List[str] = []
+    skipped_quality_records = 0
+    skipped_noise_chunks = 0
+
+    for fp in jsonl_files:
+        for record in iter_jsonl(fp):
+            validation_errors = record.validate()
+            if validation_errors:
+                errors.append(f"{fp}: doc_id={record.doc_id!r} â€“ {'; '.join(validation_errors)}")
+                continue
+
+            effective_title = (record.canonical_title or record.title).strip() or record.title
+            effective_article_id = (
+                (record.article_id or "").strip()
+                or (record.doc_id or "").strip()
+                or sanitize_for_id(effective_title, max_len=80)
+            )
+            sections = split_by_headings(record.body)
+            quality_input = record.to_dict()
+            quality_input["title"] = effective_title
+            quality_input["canonical_title"] = effective_title
+            quality_input["_section_count"] = len(sections)
+            quality = evaluate_document_quality(quality_input)
+            if not passes_quality_gate(quality, min_quality_status=min_quality_status):
+                skipped_quality_records += 1
+                continue
+
+            section_chunks = chunk_by_structure(
+                record.body,
+                title=effective_title,
+                source_name=record.source_name,
+                updated_at=record.updated_at,
+                audience=record.audience,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                sections=sections,
+            )
+
+            for idx, (heading_path, chunk_text_content) in enumerate(section_chunks):
+                section_title = heading_path.split(" > ")[-1].strip() if heading_path else record.section_title.strip()
+                section_type = classify_section_title(section_title)
+                body_text = _strip_context_header(chunk_text_content)
+                if should_skip_chunk(section_type, body_text):
+                    skipped_noise_chunks += 1
+                    continue
+
+                chunk_ref_ratio = reference_line_ratio(body_text)
+                chunk_table_ratio = table_line_ratio(body_text)
+                section_slug = section_title or record.section_title or "main"
+                cid = generate_stable_id(
+                    source_name=record.source_name,
+                    doc_id=record.doc_id,
+                    section_slug=section_slug,
+                    chunk_idx=idx,
+                )
+
+                original_cid = cid
+                counter = 1
+                while cid in seen_ids:
+                    cid = f"{original_cid}_{counter}"
+                    counter += 1
+                seen_ids.add(cid)
+
+                metadata = {
+                    "doc_id": record.doc_id,
+                    "article_id": effective_article_id,
+                    "title": effective_title,
+                    "raw_title": record.title,
+                    "canonical_title": effective_title,
+                    "section_title": section_title,
+                    "section_type": section_type,
+                    "chunk_role": infer_chunk_role(section_type),
+                    "source_name": record.source_name,
+                    "source_id": record.source_id or record.source_url or record.source_name,
+                    "institution": record.institution,
+                    "source_url": record.source_url,
+                    "source_file": record.source_file,
+                    "raw_path": record.raw_path,
+                    "processed_path": record.processed_path,
+                    "intermediate_path": record.intermediate_path,
+                    "parent_file": record.parent_file,
+                    "source_sha256": record.source_sha256,
+                    "crawl_run_id": record.crawl_run_id,
+                    "etl_run_id": record.etl_run_id,
+                    "doc_type": record.doc_type,
+                    "specialty": record.specialty,
+                    "audience": record.audience,
+                    "language": record.language,
+                    "language_confidence": record.language_confidence,
+                    "is_mixed_language": record.is_mixed_language,
+                    "trust_tier": record.trust_tier,
+                    "published_at": record.published_at,
+                    "updated_at": record.updated_at,
+                    "tags": record.tags,
+                    "heading_path": heading_path or record.heading_path,
+                    "chunk_index": idx,
+                    "quality_score": quality["quality_score"],
+                    "quality_status": quality["quality_status"],
+                    "quality_flags": quality["quality_flags"],
+                    "document_reference_line_ratio": quality["reference_line_ratio"],
+                    "document_table_line_ratio": quality["table_line_ratio"],
+                    "reference_line_ratio": chunk_ref_ratio,
+                    "table_line_ratio": chunk_table_ratio,
+                }
+
+                yield Chunk(id=cid, text=chunk_text_content, metadata=metadata)
+
+    if errors:
+        print(f"[WARN] {len(errors)} validation error(s) during enriched ingest:")
+        for e in errors[:10]:
+            print(f"  - {e}")
+        if len(errors) > 10:
+            print(f"  ... and {len(errors) - 10} more")
+    if skipped_quality_records:
+        print(f"[INFO] Skipped {skipped_quality_records} record(s) below quality gate '{min_quality_status}'.")
+    if skipped_noise_chunks:
+        print(f"[INFO] Skipped {skipped_noise_chunks} noisy/reference chunk(s).")
+
+
 def ingest_enriched_jsonl(
     input_path: str,
     patterns: List[str],
@@ -315,6 +453,11 @@ def ingest_enriched_jsonl(
                 continue
 
             effective_title = (record.canonical_title or record.title).strip() or record.title
+            effective_article_id = (
+                (record.article_id or "").strip()
+                or (record.doc_id or "").strip()
+                or sanitize_for_id(effective_title, max_len=80)
+            )
             sections = split_by_headings(record.body)
             quality_input = record.to_dict()
             quality_input["title"] = effective_title
@@ -364,6 +507,7 @@ def ingest_enriched_jsonl(
 
                 metadata = {
                     "doc_id": record.doc_id,
+                    "article_id": effective_article_id,
                     "title": effective_title,
                     "raw_title": record.title,
                     "canonical_title": effective_title,
@@ -372,6 +516,7 @@ def ingest_enriched_jsonl(
                     "chunk_role": infer_chunk_role(section_type),
                     "source_name": record.source_name,
                     "source_id": record.source_id or record.source_url or record.source_name,
+                    "institution": record.institution,
                     "source_url": record.source_url,
                     "source_file": record.source_file,
                     "raw_path": record.raw_path,

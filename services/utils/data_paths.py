@@ -48,6 +48,7 @@ KNOWN_DATASET_IDS = (
     "vi_core_v1",
     "all_corpus_v1",
     "vmj_ojs_release_v2",
+    "medqa_release_v3_all_open_enriched",
 )
 LEGACY_DATASET_ALIASES: dict[str, tuple[str, ...]] = {
     "combined": ("combined",),
@@ -322,6 +323,15 @@ def chunk_texts_export_path(
 
 def chunk_metadata_export_path(
     filename: str = "chunk_metadata.jsonl",
+    *,
+    dataset_id: str | None = None,
+    profile: str | None = None,
+) -> Path:
+    return embeddings_export_dir(dataset_id=dataset_id, profile=profile) / filename
+
+
+def kaggle_embedding_input_path(
+    filename: str = "kaggle_embedding_input.jsonl",
     *,
     dataset_id: str | None = None,
     profile: str | None = None,

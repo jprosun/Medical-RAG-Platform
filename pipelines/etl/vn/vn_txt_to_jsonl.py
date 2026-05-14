@@ -156,6 +156,13 @@ def _make_doc_id(source_id: str, filepath: str, section_idx: int) -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
 
+def _make_article_id(source_id: str, filepath: str, title: str) -> str:
+    """Generate a stable article-level ID shared by all sections/chunks."""
+    basename = Path(filepath).stem
+    raw = f"{source_id}:{basename}:{title}"
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
 def _normalize_marker_text(text: str) -> str:
     lowered = vn_text_cleaner.clean(str(text or "")).lower()
     lowered = re.sub(r"\s+", " ", lowered)
@@ -447,6 +454,8 @@ def process_file(filepath: str, source_id: str | None = None, etl_run_id: str = 
 
     # 5. Sectionize (source-aware v3)
     sections = vn_sectionizer.sectionize(title, cleaned_body, source_id=src_id)
+    article_id = _make_article_id(src_id, filepath, title)
+    institution = meta.get("institution", "")
 
     # 6. Create records for each section
     records: list[dict] = []
@@ -465,9 +474,11 @@ def process_file(filepath: str, source_id: str | None = None, etl_run_id: str = 
 
         record = {
             "doc_id": doc_id,
+            "article_id": article_id,
             "title": rec_title,
             "body": section_body,
             "source_name": enriched["source_name"],
+            "institution": institution,
             "section_title": section.section_title,
             "source_url": source_url,
             "source_id": src_id,

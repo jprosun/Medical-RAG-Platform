@@ -34,9 +34,9 @@ from services.utils.data_paths import (  # noqa: E402
 
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION = os.getenv("QDRANT_COLLECTION", "staging_medqa_vi_vmj_v2")
-BATCH_SIZE = 64
-EMBED_DATASET_ID = os.getenv("EMBED_DATASET_ID", "")
+COLLECTION = os.getenv("QDRANT_COLLECTION", "medqa_release_v3_all_bge_m3")
+BATCH_SIZE = 256
+EMBED_DATASET_ID = os.getenv("EMBED_DATASET_ID", "medqa_release_v3_all_open_enriched")
 KAGGLE_PROFILE = os.getenv("KAGGLE_PROFILE", "multilingual")
 
 EMBEDDINGS_FILE = preferred_embedding_vectors_path(dataset_id=EMBED_DATASET_ID or None, profile=KAGGLE_PROFILE)
@@ -53,7 +53,7 @@ def main() -> None:
     print(f"  Profile: {KAGGLE_PROFILE}")
 
     print(f"\n[1/4] Loading embeddings from {EMBEDDINGS_FILE}...")
-    embeddings = np.load(EMBEDDINGS_FILE)
+    embeddings = np.load(EMBEDDINGS_FILE, mmap_mode="r")
     print(f"  Shape: {embeddings.shape}")
 
     print("[2/4] Loading chunk IDs...")

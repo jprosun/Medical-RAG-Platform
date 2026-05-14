@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -78,6 +79,7 @@ def _derive_source_name(source_id: str, current: str) -> str:
 
 def _derive_source_url(record: dict[str, Any]) -> str:
     source_url = _clean_scalar(record.get("source_url"))
+    article_id = _clean_scalar(record.get("article_id"))
     if source_url:
         return source_url
 
@@ -109,6 +111,8 @@ def normalize_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
         "source_name",
         "section_title",
         "source_url",
+        "article_id",
+        "institution",
         "canonical_title",
         "heading_path",
         "published_at",
@@ -140,6 +144,7 @@ def normalize_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
     original_section_title = _clean_scalar(rec.get("section_title"))
     section_title = original_section_title or "Full text"
     canonical_title = _clean_scalar(rec.get("canonical_title"))
+    article_id = _clean_scalar(rec.get("article_id"))
 
     if rec.get("source_id") == "uspstf_recommendations" and _USPSTF_SLUG_RE.match(title):
         first_line = _first_nonempty_line(body)
@@ -151,6 +156,11 @@ def normalize_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
     if not canonical_title:
         canonical_title = title
         changes.append("canonical_title")
+    if not article_id:
+        source_id_for_key = source_id or _clean_scalar(rec.get("source_name"))
+        stable_key = f"{source_id_for_key}:{canonical_title or title}:{_clean_scalar(rec.get('source_url'))}"
+        article_id = hashlib.sha1(stable_key.encode("utf-8")).hexdigest()[:16]
+        changes.append("article_id")
     if section_title != original_section_title:
         changes.append("section_title")
 
@@ -170,6 +180,7 @@ def normalize_record(record: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
 
     rec["title"] = title
     rec["body"] = body
+    rec["article_id"] = article_id
     rec["section_title"] = section_title
     rec["canonical_title"] = canonical_title
     rec["heading_path"] = heading_path
@@ -203,6 +214,7 @@ def _audit_record(record: dict[str, Any], counters: Counter[str]) -> None:
     section = _clean_scalar(record.get("section_title"))
     heading = _clean_scalar(record.get("heading_path"))
     source_url = _clean_scalar(record.get("source_url"))
+    article_id = _clean_scalar(record.get("article_id"))
     language = _clean_scalar(record.get("language"))
     source_id = _clean_scalar(record.get("source_id"))
 
@@ -212,6 +224,8 @@ def _audit_record(record: dict[str, Any], counters: Counter[str]) -> None:
         counters["missing_section_title"] += 1
     if not source_url:
         counters["missing_source_url"] += 1
+    if not article_id:
+        counters["missing_article_id"] += 1
     if not heading or ">" not in heading or (canonical and section and heading != f"{canonical} > {section}"):
         counters["heading_mismatch"] += 1
     if _looks_like_mojibake(title, language=language, source_id=source_id) or _looks_like_mojibake(body[:500], language=language, source_id=source_id):
@@ -225,28 +239,41 @@ def normalize_dataset(dataset_id: str, *, dry_run: bool = False) -> dict[str, An
     if not path.exists():
         raise FileNotFoundError(path)
 
-    normalized_rows: list[str] = []
     changed_records = 0
     change_counter: Counter[str] = Counter()
     residual: Counter[str] = Counter()
     total = 0
+    tmp_path = path.with_name(f"{path.name}.normalize.tmp")
 
-    with open(path, "r", encoding="utf-8") as fh:
-        for raw in fh:
-            if not raw.strip():
-                continue
-            total += 1
-            record = json.loads(raw)
-            normalized, changes = normalize_record(record)
-            if changes:
-                changed_records += 1
-                change_counter.update(changes)
-            _audit_record(normalized, residual)
-            normalized_rows.append(json.dumps(normalized, ensure_ascii=False))
+    if tmp_path.exists():
+        tmp_path.unlink()
 
-    if not dry_run:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(normalized_rows) + "\n")
+    out_fh = None
+    try:
+        if not dry_run:
+            out_fh = open(tmp_path, "w", encoding="utf-8")
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                if not raw.strip():
+                    continue
+                total += 1
+                record = json.loads(raw)
+                normalized, changes = normalize_record(record)
+                if changes:
+                    changed_records += 1
+                    change_counter.update(changes)
+                _audit_record(normalized, residual)
+                if out_fh is not None:
+                    out_fh.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+        if out_fh is not None:
+            out_fh.close()
+            out_fh = None
+            tmp_path.replace(path)
+    finally:
+        if out_fh is not None:
+            out_fh.close()
+        if tmp_path.exists():
+            tmp_path.unlink()
 
     report = {
         "dataset_id": dataset_id,

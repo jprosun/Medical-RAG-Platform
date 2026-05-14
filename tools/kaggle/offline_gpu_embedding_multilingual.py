@@ -14,7 +14,8 @@ from sentence_transformers import SentenceTransformer
 
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_BATCH_SIZE = 64
-DEFAULT_INPUT_NAME = "chunk_texts_for_embed.jsonl"
+DEFAULT_INPUT_NAME = "kaggle_embedding_input.jsonl"
+FALLBACK_INPUT_NAMES = ("kaggle_embedding_input.jsonl", "chunk_texts_for_embed.jsonl")
 
 
 def _find_input_jsonl(preferred_path: str, preferred_name: str) -> Path:
@@ -24,11 +25,19 @@ def _find_input_jsonl(preferred_path: str, preferred_name: str) -> Path:
             raise FileNotFoundError(f"Input path not found: {path}")
         return path
 
+    preferred_names = [preferred_name]
+    for name in FALLBACK_INPUT_NAMES:
+        if name not in preferred_names:
+            preferred_names.append(name)
+
     candidates: list[Path] = []
-    for root, _, files in os.walk("/kaggle/input"):
-        for name in files:
-            if name == preferred_name:
-                candidates.append(Path(root) / name)
+    for wanted_name in preferred_names:
+        for root, _, files in os.walk("/kaggle/input"):
+            for name in files:
+                if name == wanted_name:
+                    candidates.append(Path(root) / name)
+        if candidates:
+            break
 
     if not candidates:
         for root, _, files in os.walk("/kaggle/input"):
@@ -83,7 +92,7 @@ def _log(msg: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Offline multilingual embedding on Kaggle with terminal logs.")
-    parser.add_argument("--input-path", default="", help="Absolute path to chunk_texts_for_embed.jsonl")
+    parser.add_argument("--input-path", default="", help="Absolute path to kaggle_embedding_input.jsonl or chunk_texts_for_embed.jsonl")
     parser.add_argument("--input-name", default=DEFAULT_INPUT_NAME, help="Preferred file name to auto-discover")
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -123,9 +132,9 @@ def main() -> None:
         _log("Warmup done")
 
     t0 = time.time()
-    all_emb: list[np.ndarray] = []
     total = len(texts)
     total_batches = (total + args.batch_size - 1) // args.batch_size
+    emb_array = np.empty((total, int(dim)), dtype=np.float32)
     _log(f"Start embedding | total_chunks={total} | batch_size={args.batch_size} | total_batches={total_batches}")
 
     for batch_index, start in enumerate(range(0, total, args.batch_size), start=1):
@@ -137,7 +146,7 @@ def main() -> None:
             show_progress_bar=False,
             convert_to_numpy=True,
         )
-        all_emb.append(vecs)
+        emb_array[start : start + len(batch)] = vecs.astype(np.float32, copy=False)
 
         should_log = (
             batch_index == 1
@@ -162,7 +171,6 @@ def main() -> None:
             _log(msg)
 
     elapsed = time.time() - t0
-    emb_array = np.vstack(all_emb).astype(np.float32)
     norms = np.linalg.norm(emb_array[: min(5, len(emb_array))], axis=1)
     _log(
         f"Embedding complete | shape={emb_array.shape} | dtype={emb_array.dtype} | "

@@ -38,6 +38,30 @@ def test_embedding_artifact_audit_passes_when_ids_texts_metadata_and_vectors_ali
         "\n".join(json.dumps({"id": cid, "text": cid}) for cid in ids) + "\n",
         encoding="utf-8",
     )
+    (export_dir / "kaggle_embedding_input.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "id": cid,
+                    "text": cid,
+                    "metadata": {
+                        "doc_id": cid,
+                        "article_id": cid,
+                        "title": f"Title {cid}",
+                        "canonical_title": f"Title {cid}",
+                        "source_id": "demo",
+                        "source_name": "Demo",
+                        "doc_type": "research_article",
+                        "specialty": "general",
+                        "chunk_index": 0,
+                        "section_title": "Full text",
+                    },
+                }
+            )
+            for cid in ids
+        ) + "\n",
+        encoding="utf-8",
+    )
 
     audit = _reload_audit(monkeypatch, rag_root)
 
@@ -61,6 +85,10 @@ def test_embedding_artifact_audit_fails_when_text_ids_do_not_match(tmp_path, mon
     )
     (export_dir / "chunk_texts_for_embed.jsonl").write_text(
         '{"id":"c1","text":"c1"}\n',
+        encoding="utf-8",
+    )
+    (export_dir / "kaggle_embedding_input.jsonl").write_text(
+        '{"id":"c1","text":"c1","metadata":{}}\n',
         encoding="utf-8",
     )
 

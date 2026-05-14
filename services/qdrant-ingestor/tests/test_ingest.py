@@ -80,6 +80,17 @@ class TestDocumentRecord:
         errors = rec.validate()
         assert any("doc_type" in e for e in errors)
 
+    def test_research_doc_types_are_valid(self):
+        for doc_type in ("research_article", "journal_article", "original_research", "case_report", "meta_analysis"):
+            rec = DocumentRecord(
+                doc_id=f"doc-{doc_type}",
+                title="Clinical article",
+                body="Body text",
+                source_name="VMJ",
+                doc_type=doc_type,
+            )
+            assert rec.validate() == []
+
     def test_invalid_audience(self):
         rec = DocumentRecord(
             doc_id="x", title="x", body="x", source_name="x",

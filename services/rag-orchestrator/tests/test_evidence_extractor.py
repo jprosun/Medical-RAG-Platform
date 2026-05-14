@@ -226,6 +226,35 @@ def test_simple_evidence_extracts_query_focused_claims_for_summary_question():
     assert any("Rifampicin" in claim and "thải ghép" in claim for claim in claims), claims
 
 
+def test_simple_evidence_extracts_study_design_span_for_exact_design_query():
+    chunks = [
+        _make_chunk(
+            "c0",
+            "Ket qua: ty le dieu tri thanh cong la 94,7% va tac dung phu chiem 16%.",
+            "Ket qua",
+        ),
+        _make_chunk(
+            "c1",
+            (
+                "Doi tuong va phuong phap nghien cuu: Nghien cuu mo ta cat ngang tren 75 benh nhan. "
+                "Phuong phap chon mau thuan tien."
+            ),
+            "Doi tuong va phuong phap nghien cuu",
+        ),
+    ]
+    article = _make_article(chunks)
+
+    evidence = _build_simple_evidence(
+        article,
+        query="Nghien cuu nay su dung thiet ke nao va phuong phap chon mau ra sao?",
+        router_output=MockRouterOutput(),
+    )
+
+    spans = [span.supporting_span for span in evidence.direct_answer_spans]
+    assert any("mo ta cat ngang" in span.lower() for span in spans), spans
+    assert any("chon mau thuan tien" in span.lower() for span in spans), spans
+
+
 def test_simple_evidence_strips_metadata_wrappers_before_summary_focus_selection():
     chunks = [
         _make_chunk(

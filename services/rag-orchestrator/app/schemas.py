@@ -24,5 +24,7 @@ class ChatResponse(BaseModel):
     history: List[ChatMessage]
     context_used: int
     retrieved_chunks: Optional[List[ChunkDetail]] = None
+    metadata: Dict[str, Any] = {}
+    external_sources: List[Dict[str, Any]] = []
     degraded_mode: bool = False
     degraded_reason: Optional[str] = None

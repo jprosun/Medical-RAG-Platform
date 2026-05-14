@@ -26,6 +26,14 @@ from .chunk_quality_filter import filter_chunks
 from .evidence_normalizer import normalize_evidence
 from .conflict_detector import detect_conflicts
 from .coverage_scorer import score_coverage
+from .answer_planner import build_answer_plan, format_answer_plan_for_prompt, should_plan_answer
+from .answer_verifier import verify_answer
+from .external_source_resolver import (
+    ExternalEvidencePack,
+    format_external_sources_for_prompt,
+    query_needs_external_sources,
+    resolve_external_sources,
+)
 from .metrics import (
     RAG_CHAT_REQUESTS_TOTAL,
     RAG_CHAT_ERRORS_TOTAL,
@@ -94,6 +102,12 @@ def _should_expand_primary_article(router_output, query: str) -> bool:
 def _primary_expansion_max_chunks(router_output, query: str) -> int:
     answer_style = getattr(router_output, "answer_style", "")
     if answer_style == "exact":
+        query_norm = (query or "").lower()
+        if any(
+            marker in query_norm
+            for marker in ("thiết kế", "thiet ke", "đối tượng", "doi tuong", "phương pháp", "phuong phap", "cỡ mẫu", "co mau", "chọn mẫu", "chon mau")
+        ):
+            return int(os.getenv("EXACT_METHODS_PRIMARY_EXPANSION_CHUNKS", "10"))
         return int(os.getenv("EXACT_PRIMARY_EXPANSION_CHUNKS", "8"))
 
     query_norm = (query or "").lower()
@@ -505,7 +519,10 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
                     top_k_per_sub = max(3, profile_top_k // len(subqueries) + 1)
                     chunks = retriever.retrieve_multi_axis(
-                        subqueries, top_k_per_query=top_k_per_sub
+                        subqueries,
+                        top_k_per_query=top_k_per_sub,
+                        query_type=router_output.query_type,
+                        answer_style=router_output.answer_style,
                     )
                 else:
                     # Standard single-query retrieval
@@ -514,6 +531,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         search_query, 
                         top_k_override=profile_top_k,
                         retrieval_mode=retrieval_mode,
+                        query_type=router_output.query_type,
+                        answer_style=router_output.answer_style,
                     ) if retriever else []
 
                 retrieval_ms = round((time.time() - t0) * 1000.0, 2)
@@ -594,10 +613,41 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             with tracer.start_as_current_span("coverage.score") as span:
                 coverage = score_coverage(evidence_pack, router_output, search_query)
                 span.set_attribute("coverage.level", coverage.coverage_level)
+                span.set_attribute("coverage.mode", getattr(coverage, "coverage_mode", ""))
                 span.set_attribute("coverage.allow_external", coverage.allow_external)
                 if evidence_pack.conflict_notes:
                     # Penalize confidence ceiling if conflicts found
                     coverage.confidence_ceiling = "moderate"
+
+            with tracer.start_as_current_span("answer.plan") as span:
+                planner_llm = None
+                if should_plan_answer(router_output, coverage):
+                    planner_llm = _build_optional_llm_client(
+                        "LLM_ANSWER_PLANNER_ENABLED",
+                        default=False,
+                    )
+                answer_plan = build_answer_plan(
+                    search_query,
+                    evidence_pack,
+                    coverage,
+                    router_output,
+                    llm_client=planner_llm,
+                )
+                answer_plan_text = format_answer_plan_for_prompt(answer_plan)
+                span.set_attribute("answer_plan.enabled", answer_plan.enabled)
+                span.set_attribute("answer_plan.status", answer_plan.status)
+
+            with tracer.start_as_current_span("external.resolve") as span:
+                if query_needs_external_sources(search_query, coverage, router_output):
+                    external_pack = resolve_external_sources(
+                        search_query,
+                        max_sources=max(1, min(3, getattr(coverage, "max_external_sources", 2) or 2)),
+                    )
+                else:
+                    external_pack = ExternalEvidencePack(enabled=False, status="not_needed")
+                external_sources_text = format_external_sources_for_prompt(external_pack)
+                span.set_attribute("external.status", external_pack.status)
+                span.set_attribute("external.sources", len(external_pack.sources))
 
             # ── 6. Answer Composition ────────────────────────────
             with tracer.start_as_current_span("prompt.build") as span:
@@ -610,6 +660,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     router_output,
                     coverage,
                     chat_history=history,
+                    answer_plan_text=answer_plan_text,
+                    external_sources_text=external_sources_text,
                 )
 
             with tracer.start_as_current_span("llm.inference") as span:
@@ -655,6 +707,16 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                                 )
                             else:
                                 answer = _build_degraded_mode_answer(degraded_reason)
+                        except Exception as exc:
+                            RAG_FALLBACK_TOTAL.inc()
+                            request.state.error_message = str(exc)
+                            degraded_mode = True
+                            degraded_reason = "llm_generation_error"
+                            answer = _build_rate_limit_fallback_answer(
+                                search_query,
+                                evidence_pack,
+                                coverage,
+                            )
                     else:
                         RAG_FALLBACK_TOTAL.inc()
                         degraded_mode = True
@@ -666,6 +728,35 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
             RAG_GENERATION_LATENCY_SECONDS.observe(llm_ms / 1000.0)
             request.state.llm_ms = llm_ms
+
+            verification_status = "skipped"
+            verification_issues = []
+            if _env_flag("LLM_VERIFIER_ENABLED", default=True) and not degraded_mode:
+                with tracer.start_as_current_span("answer.verify") as span:
+                    verifier_llm = _build_optional_llm_client(
+                        "LLM_VERIFIER_ENABLED",
+                        default=True,
+                    )
+                    verification = verify_answer(
+                        question=search_query,
+                        answer=answer,
+                        evidence_pack=evidence_pack,
+                        coverage=coverage,
+                        router_output=router_output,
+                        external_pack=external_pack,
+                        llm_client=verifier_llm,
+                    )
+                    verification_status = verification.status
+                    verification_issues = verification.issues
+                    span.set_attribute("verification.status", verification_status)
+                    span.set_attribute("verification.issues", len(verification_issues))
+                    if verification.status == "revise" and verification.revised_answer:
+                        answer = verification.revised_answer
+                    elif verification.status == "block":
+                        answer = (
+                            "Tôi chưa thể trả lời phần cụ thể này một cách an toàn vì verifier phát hiện claim cần nguồn "
+                            "hoặc claim vượt quá evidence hiện có. Có thể hỏi lại theo hướng tổng quát hơn hoặc bổ sung nguồn/guideline cụ thể."
+                        )
 
             # append assistant response
             session_store.append(session_id, "assistant", answer)
@@ -684,6 +775,28 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 history=history,
                 context_used=len(chunks),
                 retrieved_chunks=chunks_out,
+                metadata={
+                    "query_type": router_output.query_type,
+                    "answer_policy": getattr(router_output, "answer_policy", "strict_rag"),
+                    "answer_style": router_output.answer_style,
+                    "retrieval_mode": router_output.retrieval_mode,
+                    "coverage_level": coverage.coverage_level,
+                    "coverage_mode": getattr(coverage, "coverage_mode", ""),
+                    "answer_plan_status": getattr(answer_plan, "status", "disabled"),
+                    "external_search_status": getattr(external_pack, "status", "disabled"),
+                    "verification_status": verification_status,
+                    "verification_issues": verification_issues[:10],
+                },
+                external_sources=[
+                    {
+                        "id": source.id,
+                        "title": source.title,
+                        "url": source.url,
+                        "snippet": source.snippet,
+                        "source_domain": source.source_domain,
+                    }
+                    for source in getattr(external_pack, "sources", [])
+                ],
                 degraded_mode=degraded_mode,
                 degraded_reason=degraded_reason,
             )

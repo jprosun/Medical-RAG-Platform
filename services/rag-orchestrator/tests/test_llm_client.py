@@ -84,3 +84,62 @@ def test_attempt_budget_can_shorten_noncritical_calls(monkeypatch):
         raise AssertionError("Expected UpstreamRateLimitError")
 
     assert calls["count"] == 1
+
+
+def test_deepseek_payload_disables_thinking_mode(monkeypatch):
+    client = KServeClient(
+        base_url="https://api.deepseek.com",
+        completions_path="/chat/completions",
+        model_id="deepseek-v4-flash",
+        api_key="demo",
+        timeout_s=5,
+        retries=0,
+        retry_backoff_s=0,
+    )
+    captured = {}
+
+    def fake_post(*args, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return MockResponse(
+            200,
+            payload={"choices": [{"message": {"content": "ok"}}], "usage": {}},
+        )
+
+    monkeypatch.setenv("LLM_PROVIDER_HINT", "deepseek")
+    monkeypatch.setenv("LLM_THINKING_MODE", "disabled")
+    monkeypatch.setattr("app.llm_client.requests.post", fake_post)
+
+    result = client.generate("hello")
+    assert result == "ok"
+    assert captured["json"]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured["json"]
+
+
+def test_generate_raises_when_response_has_reasoning_only_without_content(monkeypatch):
+    client = _client()
+
+    def fake_post(*args, **kwargs):
+        return MockResponse(
+            200,
+            payload={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning_content": "internal only",
+                        }
+                    }
+                ],
+                "usage": {},
+            },
+        )
+
+    monkeypatch.setattr("app.llm_client.requests.post", fake_post)
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda *_args, **_kwargs: None)
+
+    try:
+        client.generate("hello", attempt_budget=1)
+    except RuntimeError as exc:
+        assert "no assistant content" in str(exc).lower()
+    else:
+        raise AssertionError("Expected RuntimeError for reasoning-only response")

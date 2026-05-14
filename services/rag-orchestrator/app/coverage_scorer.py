@@ -131,6 +131,7 @@ class CoverageOutput:
     unsupported_concepts: list = None   # concepts user asked about but evidence doesn't cover
     concept_evidence_gap: bool = False  # True if significant gap detected
     allowed_answer_scope: str = ""      # what evidence actually supports
+    coverage_mode: str = "evidence_strong"  # evidence_strong | title_anchored | open_knowledge | retrieval_failed
 
     def __post_init__(self):
         if self.missing_requirements is None:
@@ -413,6 +414,18 @@ def score_coverage(
             if confidence_ceiling == "high":
                 confidence_ceiling = "moderate"
 
+    answer_policy = getattr(router_output, "answer_policy", "strict_rag")
+    if not ev.title and not ev.raw_text:
+        coverage_mode = "retrieval_failed"
+    elif level == "high" and not concept_evidence_gap:
+        coverage_mode = "evidence_strong"
+    elif ev.title and ev.raw_text and scores.direct_answerability >= 0.25:
+        coverage_mode = "title_anchored"
+    elif answer_policy == "open_enriched" or allow_external:
+        coverage_mode = "open_knowledge"
+    else:
+        coverage_mode = "retrieval_failed"
+
     return CoverageOutput(
         coverage_level=level,
         scores=scores,
@@ -424,4 +437,5 @@ def score_coverage(
         unsupported_concepts=unsupported_concepts,
         concept_evidence_gap=concept_evidence_gap,
         allowed_answer_scope=allowed_answer_scope,
+        coverage_mode=coverage_mode,
     )

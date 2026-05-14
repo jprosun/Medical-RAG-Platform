@@ -22,6 +22,27 @@ from .coverage_scorer import CoverageOutput
 from .retriever import RetrievedChunk
 
 
+OPEN_ENRICHED_SYSTEM_RULES = """Bạn là chuyên gia y khoa và giảng viên lâm sàng. Trả lời bằng tiếng Việt cho người có chuyên môn, đầy đủ, có cấu trúc và có độ sâu.
+
+CHÍNH SÁCH OPEN-KNOWLEDGE ENRICHED RAG:
+1. Ưu tiên evidence RAG. Claim nào lấy từ tài liệu RAG phải gắn citation [n].
+2. Được dùng kiến thức nền/chuyên sâu của LLM để giải thích, mở rộng bối cảnh, cơ chế, ý nghĩa lâm sàng khi RAG yếu hoặc thiếu.
+3. Kiến thức nền không cần citation, nhưng tuyệt đối không được gắn citation [n] nếu claim đó không nằm trong evidence.
+4. Không tự bịa số liệu, guideline mới, liều thuốc, phác đồ điều trị cụ thể, chỉ định cá nhân hóa hoặc khuyến cáo thay bác sĩ.
+5. Nếu cần số liệu/guideline/liều/phác đồ cụ thể mà evidence không có, chỉ nêu khi có external source [E]. Nếu không có nguồn, viết ở mức tổng quát.
+6. Citation phải nằm ngay sau claim được support. Citation sai evidence là lỗi nghiêm trọng.
+7. Nếu retrieval chỉ đúng title/chủ đề nhưng thiếu đoạn evidence, có thể dùng title làm anchor để giải thích nền, nhưng không xem title là bằng chứng cho số liệu hoặc kết luận cụ thể.
+8. Câu trả lời không được sơ sài. Với câu hỏi lý thuyết hoặc giải thích, hãy trả lời theo hướng bài giảng ngắn: kết luận, giải thích nền, phân tích chuyên sâu, bằng chứng có trong RAG, ý nghĩa thực hành, giới hạn/an toàn.
+"""
+
+_OPEN_ENRICHED_GUIDANCE = """CHẾ ĐỘ TRẢ LỜI OPEN_ENRICHED:
+- Hãy enrich câu trả lời bằng kiến thức nền/chuyên sâu hợp lý nếu RAG không đủ bao phủ.
+- Phần có evidence RAG phải citation [1], [2]. Phần kiến thức nền không có evidence thì không citation.
+- Không bịa số liệu, guideline, liều, phác đồ. Nếu không có nguồn cho claim cụ thể, chuyển claim đó thành mô tả khái quát.
+- Target độ dài: 800-1200 từ cho câu hỏi lý thuyết/professional explainer; 250-500 từ cho exact article answer.
+"""
+
+
 # ── System prompt with 10 composer rules (review.md §9.1) ───────────
 
 SYSTEM_RULES_V2 = """Bạn là chuyên gia y khoa và giảng viên lâm sàng (clinical educator). Trả lời các câu hỏi y học bằng tiếng Việt với văn phong học thuật, chính xác, có tổ chức logic và luôn dẫn nguồn.
@@ -222,6 +243,25 @@ _TEMPLATES = {
     "comparative_synthesis": _TEMPLATE_COMPARATIVE,
     "guideline_comparison": _TEMPLATE_GUIDELINE,
     "teaching_explainer": _TEMPLATE_TEACHING,
+    "professional_explainer": """Trả lời theo cấu trúc:
+
+## Kết luận trực tiếp
+2-4 câu trả lời thẳng vào câu hỏi.
+
+## Giải thích nền tảng
+Giải thích khái niệm, cơ chế hoặc bối cảnh y khoa cần thiết cho người có chuyên môn.
+
+## Phân tích chuyên sâu
+Triển khai các ý chính theo logic lâm sàng/sinh học bệnh. Có thể dùng kiến thức nền nếu không gắn citation giả.
+
+## Bằng chứng từ tài liệu truy hồi
+Nêu rõ tài liệu RAG hỗ trợ phần nào. Chỉ gắn [n] vào claim có trong evidence.
+
+## Ý nghĩa thực hành và lưu ý an toàn
+Nêu ý nghĩa ứng dụng, giới hạn bằng chứng, và tránh khuyến cáo cá nhân hóa.
+
+## Nguồn tham khảo
+Liệt kê tài liệu RAG [n] và external source [E] nếu có.""",
 }
 
 
@@ -376,10 +416,12 @@ def _should_include_secondary_sources(router_output: RouterOutput) -> bool:
     retrieval_mode = getattr(router_output, "retrieval_mode", "")
     if retrieval_mode == "article_centric":
         return False
-    return router_output.query_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer"}
+    return router_output.query_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer", "professional_explainer"}
 
 
 def _select_template(router_output: RouterOutput) -> str:
+    if getattr(router_output, "query_type", "") == "professional_explainer":
+        return _TEMPLATES["professional_explainer"]
     answer_style = getattr(router_output, "answer_style", "")
     if answer_style == "exact":
         return _TEMPLATE_EXACT
@@ -462,21 +504,30 @@ def build_prompt_v2(
     router_output: RouterOutput,
     coverage: CoverageOutput,
     chat_history: list | None = None,
-) -> List[Dict[str, str]]:
+    answer_plan_text: str = "",
+    external_sources_text: str = "",
+) -> str:
     """
     Build structured LLM prompt with evidence pack, router signals, and templates.
 
     This is the main entry point for the Answer Composer (review.md §9).
     """
-    messages = [{"role": "system", "content": SYSTEM_RULES_V2}]
+    answer_policy = getattr(router_output, "answer_policy", "strict_rag")
+    coverage_mode = getattr(coverage, "coverage_mode", "")
+    open_enriched = answer_policy == "open_enriched" or coverage_mode in {"open_knowledge", "title_anchored"}
+    system_rules = OPEN_ENRICHED_SYSTEM_RULES if open_enriched else SYSTEM_RULES_V2
+    messages = [{"role": "system", "content": system_rules}]
 
     # Chat history (last 6 messages)
     if chat_history:
+        history_lines: list[str] = []
         for m in chat_history[-6:]:
-            role = m.get("role", "user")
+            role = str(m.get("role", "user") or "user").upper()
             content = m.get("content", "")
             if content.strip():
-                messages.append({"role": role, "content": content})
+                history_lines.append(f"{role}: {content}")
+        if history_lines:
+            sections.append("CHAT_HISTORY:\n" + "\n".join(history_lines))
 
     # Build context from evidence
     context_str = _format_evidence_context(evidence_pack, question=question)
@@ -538,6 +589,8 @@ def build_prompt_v2(
     # Compose user message
     user_content = (
         f"EVIDENCE:\n{context_str}\n\n"
+        f"{answer_plan_text + chr(10) + chr(10) if answer_plan_text else ''}"
+        f"{external_sources_text + chr(10) + chr(10) if external_sources_text else ''}"
         f"{'═' * 60}\n"
         f"QUESTION: {question}\n\n"
         f"QUERY TYPE: {router_output.query_type}\n"
@@ -585,29 +638,33 @@ def build_prompt(
     question: str,
     chunks: List[RetrievedChunk],
     chat_history: list | None = None,
-) -> List[Dict[str, str]]:
+) -> str:
     """Legacy prompt builder — kept as fallback."""
-    messages = [{"role": "system", "content": SYSTEM_RULES_LEGACY}]
+    sections: list[str] = []
 
     if chat_history:
+        history_lines: list[str] = []
         for m in chat_history[-6:]:
-            role = m.get("role", "user")
+            role = str(m.get("role", "user") or "user").upper()
             content = m.get("content", "")
             if content.strip():
-                messages.append({"role": role, "content": content})
+                history_lines.append(f"{role}: {content}")
+        if history_lines:
+            sections.append("CHAT_HISTORY:\n" + "\n".join(history_lines))
 
     if not chunks:
-        context_str = "No medical context provided."
+        context_str = "NO_CONTEXT"
     else:
         context_str = "\n\n---\n\n".join(
             _format_chunk_legacy(c) for c in chunks
         )
 
     lang_hint = "Hãy đọc ngữ cảnh kỹ lưỡng và đưa ra bài phân tích học thuật chi tiết, sâu sắc. Dẫn nguồn đầy đủ ở cuối. Không viết quá ngắn."
-    user_content = f"CONTEXT:\n{context_str}\n\nQUESTION: {question}\n\n{lang_hint}"
-    messages.append({"role": "user", "content": user_content})
+    sections.append(f"CONTEXT:\n{context_str}")
+    sections.append(f"QUESTION: {question}")
+    sections.append(lang_hint)
 
-    return messages
+    return "\n\n".join(sections)
 
 
 def build_prompt_v2(
@@ -616,6 +673,8 @@ def build_prompt_v2(
     router_output: RouterOutput,
     coverage: CoverageOutput,
     chat_history: list | None = None,
+    answer_plan_text: str = "",
+    external_sources_text: str = "",
 ) -> List[Dict[str, str]]:
     """
     Overridden v2 builder with tighter boundary control.
@@ -624,7 +683,11 @@ def build_prompt_v2(
     the active one at import time and avoids forcing a generic insufficiency
     disclaimer for every medium-confidence answer.
     """
-    messages = [{"role": "system", "content": SYSTEM_RULES_V2}]
+    answer_policy = getattr(router_output, "answer_policy", "strict_rag")
+    coverage_mode = getattr(coverage, "coverage_mode", "")
+    open_enriched = answer_policy == "open_enriched" or coverage_mode in {"open_knowledge", "title_anchored"}
+    system_rules = OPEN_ENRICHED_SYSTEM_RULES if open_enriched else SYSTEM_RULES_V2
+    messages = [{"role": "system", "content": system_rules}]
 
     if chat_history:
         for m in chat_history[-6:]:
@@ -655,6 +718,8 @@ def build_prompt_v2(
     allowed_scope = getattr(coverage, "allowed_answer_scope", "") or ""
 
     prompt_prefix = ""
+    if open_enriched:
+        prompt_prefix += _OPEN_ENRICHED_GUIDANCE + "\n"
     if _should_force_opening_disclaimer(coverage):
         missing_str = ", ".join(missing) if missing else "một số khía cạnh"
         prompt_prefix += (
@@ -668,7 +733,12 @@ def build_prompt_v2(
             "Trả lời thẳng ở phần 'Kết luận ngắn', chỉ nêu giới hạn đúng tại claim còn thiếu evidence.\n\n"
         )
 
-    if not include_secondary_sources:
+    if open_enriched:
+        prompt_prefix += (
+            "PHẠM VI NGUỒN: Tài liệu RAG là evidence ưu tiên. Được dùng kiến thức nền ngoài RAG để giải thích, "
+            "nhưng chỉ gắn citation [n] hoặc [E] vào claim thật sự được nguồn đó hỗ trợ.\n\n"
+        )
+    elif not include_secondary_sources:
         prompt_prefix += (
             "PHẠM VI NGUỒN: Với câu hỏi này, chỉ dùng TÀI LIỆU CHÍNH [1] để hình thành kết luận. "
             "Không được đưa chi tiết từ tài liệu khác vào phần kết luận chính.\n\n"
@@ -680,7 +750,15 @@ def build_prompt_v2(
             "trong kết luận chính.\n\n"
         )
 
-    if unsupported and allowed_scope:
+    if open_enriched and unsupported:
+        unsupported_str = ", ".join(unsupported[:5])
+        prompt_prefix += (
+            "PHẠM VI ENRICHMENT:\n"
+            f"- RAG chưa có evidence trực tiếp cho: {unsupported_str}.\n"
+            "- Được giải thích kiến thức nền liên quan nếu hợp lý, nhưng không gắn citation RAG cho phần đó.\n"
+            "- Nếu các phần này cần số liệu/guideline/liều/phác đồ cụ thể, chỉ nêu khi có external source [E].\n\n"
+        )
+    elif unsupported and allowed_scope:
         unsupported_str = ", ".join(unsupported[:5])
         prompt_prefix += (
             "HƯỚNG DẪN SCOPE:\n"
@@ -700,6 +778,10 @@ def build_prompt_v2(
 
     prompt_prefix += _answer_style_instruction(router_output)
     prompt_prefix += _query_scope_instruction(question, evidence_pack, router_output)
+    if answer_plan_text or external_sources_text:
+        context_str = "\n\n".join(
+            part for part in (context_str, answer_plan_text, external_sources_text) if part
+        )
 
     user_content = (
         f"EVIDENCE:\n{context_str}\n\n"

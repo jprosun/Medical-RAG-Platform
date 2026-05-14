@@ -1,7 +1,9 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.retriever import _same_article_chunk_bonus
+from types import SimpleNamespace
+
+from app.retriever import RetrievedChunk, _build_primary_article_scroll_filter, _same_article_chunk_bonus
 
 
 def test_same_article_chunk_bonus_prefers_transplant_drug_interaction_evidence():
@@ -36,3 +38,50 @@ def test_same_article_chunk_bonus_penalizes_dense_tables_for_group_factor_querie
     table_bonus = _same_article_chunk_bonus(query, table_text, {"section_title": "Tóm tắt"})
 
     assert factor_bonus > table_bonus
+
+
+def test_same_article_chunk_bonus_prefers_methods_section_for_study_design_queries():
+    query = "Nghiên cứu này sử dụng thiết kế nào và cỡ mẫu ra sao?"
+    methods_text = (
+        "Đối tượng và phương pháp nghiên cứu: Nghiên cứu mô tả cắt ngang trên 75 bệnh nhân. "
+        "Phương pháp chọn mẫu thuận tiện."
+    )
+    results_text = (
+        "Kết quả: tỷ lệ điều trị thành công là 94,7% và tác dụng phụ chiếm 16%."
+    )
+
+    methods_bonus = _same_article_chunk_bonus(query, methods_text, {"section_title": "Đối tượng và phương pháp nghiên cứu"})
+    results_bonus = _same_article_chunk_bonus(query, results_text, {"section_title": "Kết quả"})
+
+    assert methods_bonus > results_bonus
+
+
+def test_primary_article_scroll_filter_expands_legacy_issue_url_title_across_split_doc_ids():
+    article = SimpleNamespace(
+        title="Ở BỆNH NHÂN LOÉT DẠ DÀY TÁ TRÀNG TẠI BỆNH VIỆN TRƯỜNG ĐẠI HỌC Y KHOA VINH",
+        chunks=[
+            RetrievedChunk(
+                id="legacy-summary",
+                text="Summary chunk",
+                score=0.7,
+                metadata={
+                    "title": "Ở BỆNH NHÂN LOÉT DẠ DÀY TÁ TRÀNG TẠI BỆNH VIỆN TRƯỜNG ĐẠI HỌC Y KHOA VINH",
+                    "section_title": "SUMMARY",
+                    "doc_id": "doc-summary",
+                    "source_name": "Tạp chí Y học Việt Nam",
+                    "source_url": "https://tapchiyhocvietnam.vn/index.php/vmj/issue/view/311",
+                },
+            )
+        ],
+    )
+
+    qfilter = _build_primary_article_scroll_filter(article)
+
+    assert qfilter is not None
+    assert qfilter.should is not None
+    assert len(qfilter.should) == 2
+    title_branch = next(branch for branch in qfilter.should if getattr(branch, "must", None))
+    title_keys = [cond.key for cond in title_branch.must]
+
+    assert "title" in title_keys
+    assert "source_name" in title_keys

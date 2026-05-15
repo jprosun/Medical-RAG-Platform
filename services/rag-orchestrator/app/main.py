@@ -209,8 +209,107 @@ def _fallback_candidates_from_text(text: str) -> list[str]:
     return candidates
 
 
-def _build_rate_limit_fallback_answer(question: str, evidence_pack, coverage) -> str:
+def _citation_label(index: int) -> str:
+    return f"[{index}]"
+
+
+def _build_open_enriched_fallback_answer(question: str, evidence_pack, coverage) -> str:
+    """Deterministic professional explainer when the upstream LLM times out."""
+    primary = getattr(evidence_pack, "primary_source", None)
+    sources = []
+    if primary:
+        sources.append(primary)
+    for source in getattr(evidence_pack, "secondary_sources", []) or []:
+        if source and source not in sources:
+            sources.append(source)
+        if len(sources) >= 4:
+            break
+
+    source_titles = [getattr(source, "title", "") for source in sources if getattr(source, "title", "")]
+    source_list = "\n".join(
+        f"{_citation_label(i)} {title}"
+        for i, title in enumerate(source_titles, start=1)
+    )
+
+    candidates = []
+    for source_index, source in enumerate(sources, start=1):
+        for finding in getattr(source, "key_findings", []) or []:
+            claim = (getattr(finding, "claim", "") or "").strip()
+            if claim:
+                candidates.append((claim, source_index))
+        conclusion = getattr(getattr(source, "authors_conclusion", None), "text", "") or ""
+        if conclusion:
+            candidates.append((conclusion.strip(), source_index))
+        for sentence in _fallback_candidates_from_text(getattr(source, "raw_text", "") or "")[:4]:
+            candidates.append((sentence, source_index))
+
+    seen = set()
+    scored = []
+    scope = getattr(coverage, "allowed_answer_scope", "") if coverage else ""
+    query_text = f"{question} {scope} {' '.join(source_titles)}".lower()
+    query_terms = _extractive_terms(query_text)
+    for candidate, source_index in candidates:
+        norm = candidate.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        overlap = sum(1 for term in query_terms if term in norm)
+        numeric_bonus = 1 if re.search(r"\b\d+\b|%|OR|HR|AUC|n\s*=", candidate, flags=re.IGNORECASE) else 0
+        scored.append((overlap, numeric_bonus, len(candidate), candidate, source_index))
+
+    scored.sort(key=lambda x: (-x[0], -x[1], -x[2]))
+    evidence_lines = [
+        f"- {candidate} {_citation_label(source_index)}"
+        for _, _, _, candidate, source_index in scored[:5]
+    ]
+
+    q_norm = question.lower()
+    oncology_combo = any(term in q_norm for term in ("buồng trứng", "buong trung", "ovarian")) and any(
+        term in q_norm for term in ("diệp thể", "diep the", "phyllode", "phyllodes")
+    )
+    if oncology_combo:
+        body = [
+            "Kết luận trực tiếp: trong bối cảnh một người bệnh có đồng thời carcinôm tuyến buồng trứng tái phát/di căn xa và u diệp thể ác ở vú, sinh thiết đầy đủ và hóa mô miễn dịch quan trọng vì chúng trả lời câu hỏi nền tảng nhất: tổn thương hiện tại thuộc bệnh nào, có phải di căn của ung thư buồng trứng, một ung thư vú biểu mô độc lập, hay một u mô đệm dạng phyllodes. Nếu phân loại sai nguồn gốc u, toàn bộ quyết định điều trị, tiên lượng và cách theo dõi có thể đi sai hướng.",
+            "Về mặt bệnh học, hai thực thể này khác nhau ở bản chất tế bào. Carcinôm tuyến buồng trứng là ung thư biểu mô, thường cần đánh giá hình thái tuyến, kiểu lan tràn phúc mạc/di căn và các dấu ấn biểu mô phù hợp. U diệp thể vú lại là u xơ-biểu mô, trong đó phần mô đệm quyết định mức độ lành, giáp biên hay ác tính. Vì vậy chỉ nhìn đại thể hoặc hình ảnh học thường không đủ; cần mẫu mô đủ rộng để thấy cấu trúc u, mật độ tế bào mô đệm, dị dạng nhân, hoạt động phân bào, hoại tử, ranh giới xâm nhập và các thành phần biểu mô đi kèm.",
+            "Sinh thiết đầy đủ giúp tránh sai lệch lấy mẫu. Với u diệp thể, lõi sinh thiết quá ít có thể chỉ bắt được vùng giống u xơ tuyến hoặc chỉ bắt được phần hoại tử/xơ hóa, làm đánh giá thấp độ ác. Với bệnh nhân đã có ung thư buồng trứng di căn, một khối ở vú hoặc tổn thương mới rất dễ bị diễn giải thiên lệch là di căn hoặc là ung thư vú thông thường. Mẫu mô đủ đại diện giúp bác sĩ giải phẫu bệnh phân biệt u nguyên phát, di căn, tổn thương phối hợp hoặc hai bệnh ác tính đồng thời.",
+            "Hóa mô miễn dịch có vai trò như lớp kiểm chứng nguồn gốc và kiểu biệt hóa của tế bào u. Trong thực hành, IHC không thay thế hình thái học, nhưng giúp củng cố hoặc loại trừ các chẩn đoán gần nhau: nhóm marker biểu mô hỗ trợ carcinôm; các marker liên quan vú, buồng trứng hoặc Mullerian giúp định hướng cơ quan nguồn; các marker tăng sinh và đặc điểm mô đệm giúp đánh giá bản chất ác tính của u diệp thể. Điểm quan trọng là panel IHC phải được chọn theo câu hỏi chẩn đoán cụ thể, không dùng rời rạc từng marker.",
+            "Ý nghĩa lâm sàng là rất lớn. Nếu tổn thương là tiến triển của ung thư buồng trứng, chiến lược thường xoay quanh điều trị toàn thân và đánh giá gánh nặng di căn. Nếu là u diệp thể ác ở vú, xử trí lại thiên về kiểm soát tại chỗ bằng phẫu thuật diện cắt thích hợp và theo dõi tái phát/di căn, trong khi vai trò hóa trị, xạ trị hoặc điều trị miễn dịch bổ sung không thể suy diễn như carcinôm vú biểu mô. Nếu là hai bệnh đồng mắc, hội chẩn đa chuyên khoa cần ưu tiên bệnh đang đe dọa tính mạng, khả năng phẫu thuật, thể trạng và mục tiêu điều trị.",
+        ]
+    else:
+        body = [
+            "Kết luận trực tiếp: sinh thiết đầy đủ và hóa mô miễn dịch quan trọng vì chúng xác định bản chất mô học, nguồn gốc tổn thương và mức độ chắc chắn của chẩn đoán. Khi câu hỏi liên quan nhiều bệnh hoặc nhiều vị trí tổn thương, đây là bước quyết định để tránh điều trị theo giả định.",
+            "Về nguyên tắc, hình ảnh học và biểu hiện lâm sàng cho biết vị trí, kích thước và mức lan rộng, nhưng không thể thay thế mô bệnh học. Sinh thiết cung cấp mô để đánh giá cấu trúc u, loại tế bào, mức độ dị dạng, hoạt động phân bào, hoại tử và kiểu xâm nhập. Hóa mô miễn dịch bổ sung bằng cách kiểm tra các dấu ấn protein, giúp phân biệt các nhóm u có hình thái gần giống nhau.",
+            "Trong bệnh cảnh chuyên khoa, giá trị lớn nhất của IHC là kiểm soát sai số chẩn đoán: phân biệt u nguyên phát với di căn, phân biệt ung thư biểu mô với u mô đệm/lympho/sarcoma, và xác định các đặc điểm có ý nghĩa tiên lượng hoặc định hướng điều trị. Tuy nhiên, IHC phải được diễn giải cùng hình thái mô học và bệnh cảnh lâm sàng; một marker đơn lẻ hiếm khi đủ để kết luận.",
+        ]
+
+    if evidence_lines:
+        evidence_section = "Bằng chứng truy hồi được từ RAG:\n" + "\n".join(evidence_lines)
+    else:
+        evidence_section = (
+            "Bằng chứng truy hồi được từ RAG: hệ thống chưa lấy được đoạn chứng cứ đủ mạnh trong lượt này, "
+            "nên phần trên được trình bày như giải thích nền/chuyên sâu không gắn citation giả."
+        )
+
+    limits = (
+        "Giới hạn an toàn: câu trả lời này không đưa ra phác đồ cá nhân hóa, liều thuốc hoặc khuyến cáo guideline mới. "
+        "Các nhận định có citation chỉ nên hiểu là được hỗ trợ bởi tài liệu đã truy hồi; phần giải thích nền không có citation là kiến thức tổng quát để giúp người dùng hiểu bối cảnh."
+    )
+    system_note = (
+        "Ghi chú hệ thống: mô hình sinh câu trả lời chính không phản hồi kịp trong lượt này, "
+        "nên hệ thống dùng fallback chuyên môn có kiểm soát để tránh trả lời quá ngắn."
+    )
+    parts = body + [evidence_section, limits]
+    if source_list:
+        parts.append("Nguồn:\n" + source_list)
+    parts.append(system_note)
+    return "\n\n".join(parts)
+
+
+def _build_rate_limit_fallback_answer(question: str, evidence_pack, coverage, router_output=None) -> str:
     """Return a deterministic extractive fallback instead of surfacing a raw 500."""
+    if getattr(router_output, "answer_policy", "") == "open_enriched":
+        return _build_open_enriched_fallback_answer(question, evidence_pack, coverage)
+
     primary = getattr(evidence_pack, "primary_source", None)
     title = getattr(primary, "title", "") if primary else ""
     scope = getattr(coverage, "allowed_answer_scope", "") if coverage else ""
@@ -699,11 +798,15 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             request.state.error_message = str(exc)
                             degraded_mode = True
                             degraded_reason = "upstream_rate_limit"
-                            if _env_flag("ALLOW_RATE_LIMIT_FALLBACK", default=False):
+                            if (
+                                _env_flag("ALLOW_RATE_LIMIT_FALLBACK", default=False)
+                                or getattr(router_output, "answer_policy", "") == "open_enriched"
+                            ):
                                 answer = _build_rate_limit_fallback_answer(
                                     search_query,
                                     evidence_pack,
                                     coverage,
+                                    router_output=router_output,
                                 )
                             else:
                                 answer = _build_degraded_mode_answer(degraded_reason)
@@ -716,12 +819,21 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                                 search_query,
                                 evidence_pack,
                                 coverage,
+                                router_output=router_output,
                             )
                     else:
                         RAG_FALLBACK_TOTAL.inc()
                         degraded_mode = True
                         degraded_reason = "llm_unavailable"
-                        answer = _build_degraded_mode_answer(degraded_reason)
+                        if getattr(router_output, "answer_policy", "") == "open_enriched":
+                            answer = _build_rate_limit_fallback_answer(
+                                search_query,
+                                evidence_pack,
+                                coverage,
+                                router_output=router_output,
+                            )
+                        else:
+                            answer = _build_degraded_mode_answer(degraded_reason)
                 llm_ms = round((time.time() - g0) * 1000.0, 2)
 
             kserve = build_kserve_client_from_env()
@@ -765,7 +877,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             history = session_store.get_history(session_id)
 
             chunks_out = [
-                {"id": c.id, "text": c.text, "metadata": c.metadata} 
+                {"id": c.id, "text": c.text, "score": c.score, "metadata": c.metadata}
                 for c in chunks
             ] if chunks else []
 

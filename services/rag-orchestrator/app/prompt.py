@@ -42,6 +42,33 @@ _OPEN_ENRICHED_GUIDANCE = """CHẾ ĐỘ TRẢ LỜI OPEN_ENRICHED:
 - Target độ dài: 800-1200 từ cho câu hỏi lý thuyết/professional explainer; 250-500 từ cho exact article answer.
 """
 
+_OPEN_ENRICHED_RESPONSE_TEMPLATE = """Trả lời theo cấu trúc bắt buộc:
+
+## Ý chính và câu trả lời trực tiếp
+- Trả lời thẳng vào câu hỏi trước, không mở đầu bằng "tài liệu không đề cập" hoặc disclaimer dài.
+- Ý nào lấy từ RAG thì đặt citation ngay sau claim, ví dụ: "... [1]".
+- Ý nào là kiến thức nền/chuyên sâu do LLM giải thích thêm thì viết tự nhiên, không gắn citation giả.
+
+## Giải thích nền tảng và phân tích chuyên sâu
+- Giải thích cơ chế, bối cảnh lâm sàng, phân loại, logic ra quyết định hoặc ý nghĩa thực hành.
+- Không biến phần này thành danh sách những thứ tài liệu không cung cấp.
+- Không nêu số liệu, ngưỡng guideline, liều thuốc hoặc phác đồ cụ thể nếu không có RAG/external source hỗ trợ.
+
+## Bằng chứng từ tài liệu truy hồi
+- Chỉ tóm tắt những claim thật sự được RAG hỗ trợ và gắn citation tại từng claim.
+- Nếu RAG chỉ hỗ trợ một phần câu hỏi, chỉ nêu ngắn gọn phạm vi evidence; không viết một đoạn phủ định dài kiểu "tài liệu không đề cập..." cho từng ý.
+
+## Ý nghĩa thực hành và lưu ý an toàn
+- Nêu ý nghĩa ứng dụng, giới hạn suy luận, và ranh giới an toàn.
+- Nếu có phần cần guideline/số liệu/phác đồ nhưng không có nguồn, nói ở mức khái quát và không gắn citation.
+
+## Nguồn tham khảo
+- Liệt kê nguồn RAG [n] và external source [E] nếu có.
+
+## Kết luận ngắn
+2-4 câu chốt lại câu trả lời sau khi đã phân tích. Đây phải là phần nội dung cuối cùng của câu trả lời.
+Không đưa câu kiểu "tài liệu không đề cập/không cung cấp" vào kết luận. Nếu kết luận lặp lại claim lấy từ RAG, vẫn giữ citation ngay sau claim."""
+
 
 # ── System prompt with 10 composer rules (review.md §9.1) ───────────
 
@@ -533,7 +560,7 @@ def build_prompt_v2(
     context_str = _format_evidence_context(evidence_pack, question=question)
 
     # Get template for this query type
-    template = _select_template(router_output)
+    template = _OPEN_ENRICHED_RESPONSE_TEMPLATE if open_enriched else _select_template(router_output)
 
     # Handle secondary section placeholder
     secondary_section = ""
@@ -702,7 +729,7 @@ def build_prompt_v2(
         include_secondary_sources=include_secondary_sources,
         question=question,
     )
-    template = _select_template(router_output)
+    template = _OPEN_ENRICHED_RESPONSE_TEMPLATE if open_enriched else _select_template(router_output)
 
     secondary_section = ""
     if include_secondary_sources and evidence_pack.secondary_sources:
@@ -720,7 +747,7 @@ def build_prompt_v2(
     prompt_prefix = ""
     if open_enriched:
         prompt_prefix += _OPEN_ENRICHED_GUIDANCE + "\n"
-    if _should_force_opening_disclaimer(coverage):
+    if not open_enriched and _should_force_opening_disclaimer(coverage):
         missing_str = ", ".join(missing) if missing else "một số khía cạnh"
         prompt_prefix += (
             "BẮT BUỘC mở đầu câu trả lời bằng đúng câu sau:\n"
@@ -729,14 +756,15 @@ def build_prompt_v2(
         )
     else:
         prompt_prefix += (
-            "KHÔNG được mở đầu bằng disclaimer chung chung nếu ý chính đã có evidence trực tiếp. "
-            "Trả lời thẳng ở phần 'Kết luận ngắn', chỉ nêu giới hạn đúng tại claim còn thiếu evidence.\n\n"
+            "KHÔNG được mở đầu bằng disclaimer chung chung hoặc phần phủ định dài về dữ liệu thiếu. "
+            "Trả lời thẳng ở phần nội dung chính; chỉ nêu giới hạn đúng tại claim còn thiếu evidence.\n\n"
         )
 
     if open_enriched:
         prompt_prefix += (
             "PHẠM VI NGUỒN: Tài liệu RAG là evidence ưu tiên. Được dùng kiến thức nền ngoài RAG để giải thích, "
-            "nhưng chỉ gắn citation [n] hoặc [E] vào claim thật sự được nguồn đó hỗ trợ.\n\n"
+            "nhưng chỉ gắn citation [n] hoặc [E] vào claim thật sự được nguồn đó hỗ trợ. "
+            "Không viết danh sách phủ định dài kiểu 'tài liệu không đề cập' trong phần nội dung chính.\n\n"
         )
     elif not include_secondary_sources:
         prompt_prefix += (
@@ -751,11 +779,11 @@ def build_prompt_v2(
         )
 
     if open_enriched and unsupported:
-        unsupported_str = ", ".join(unsupported[:5])
         prompt_prefix += (
             "PHẠM VI ENRICHMENT:\n"
-            f"- RAG chưa có evidence trực tiếp cho: {unsupported_str}.\n"
             "- Được giải thích kiến thức nền liên quan nếu hợp lý, nhưng không gắn citation RAG cho phần đó.\n"
+            "- Không viết danh sách phủ định dài kiểu 'tài liệu không đề cập...' trong phần Ý chính hoặc Giải thích.\n"
+            "- Nếu cần nói về thiếu evidence, chỉ viết một câu ngắn trong phần Ý nghĩa thực hành và lưu ý an toàn.\n"
             "- Nếu các phần này cần số liệu/guideline/liều/phác đồ cụ thể, chỉ nêu khi có external source [E].\n\n"
         )
     elif unsupported and allowed_scope:
@@ -793,7 +821,10 @@ def build_prompt_v2(
         f"{prompt_prefix}"
         "Hãy đọc evidence kỹ lưỡng và trả lời trực tiếp phần nào đã được support rõ. "
         "Nếu còn phần thiếu evidence, nêu ngắn gọn đúng phần thiếu thay vì viết một đoạn từ chối dài. "
-        "Dẫn nguồn [n] đầy đủ trong câu."
+        "Dẫn nguồn [n] đầy đủ trong câu. "
+        "Không đặt 'Kết luận ngắn' ở đầu; nếu template có mục này, nó phải là phần nội dung cuối cùng. "
+        "Không đưa câu kiểu 'tài liệu không đề cập/không cung cấp' vào phần Kết luận ngắn. "
+        "Không gắn citation vào kiến thức nền không nằm trong evidence."
     )
 
     messages.append({"role": "user", "content": user_content})

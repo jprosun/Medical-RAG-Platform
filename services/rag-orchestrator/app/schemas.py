@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
 class ChunkDetail(BaseModel):
     id: str
     text: str
+    score: Optional[float] = None
     metadata: Dict[str, Any]
 
 

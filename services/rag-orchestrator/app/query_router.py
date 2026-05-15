@@ -320,6 +320,32 @@ def _looks_single_document_question(text_lower: str) -> bool:
     return any(hint in padded or hint in padded_stripped for hint in hints)
 
 
+_OPEN_ENRICHED_TOPIC_TYPES = {
+    "fact_extraction",
+    "study_result_extraction",
+    "research_appraisal",
+    "comparative_synthesis",
+    "guideline_comparison",
+    "teaching_explainer",
+    "professional_explainer",
+}
+
+
+def _should_use_open_enriched_policy(
+    query_lower: str,
+    best_type: str,
+    single_document_question: bool,
+) -> bool:
+    """Use open enrichment for real user topic questions, not article-bound asks."""
+    if single_document_question:
+        return False
+    if best_type not in _OPEN_ENRICHED_TOPIC_TYPES:
+        return False
+    if best_type == "study_result_extraction" and _asks_for_numeric_value(query_lower):
+        return False
+    return True
+
+
 def route_query(query: str) -> RouterOutput:
     """
     Classify a query into one of 6 types using rule-based heuristics.
@@ -397,7 +423,7 @@ def route_query(query: str) -> RouterOutput:
             "answer_style": "exact",
             "retrieval_profile": "light",
             "needs_extractor": False,
-            "retrieval_mode": "topic_summary",
+            "retrieval_mode": "mechanistic_synthesis",
         },
         "study_result_extraction": {
             "depth": "high",
@@ -463,6 +489,13 @@ def route_query(query: str) -> RouterOutput:
 
     config = dict(_TYPE_CONFIG[best_type])
     config["answer_style"] = answer_style
+
+    answer_policy = (
+        "open_enriched"
+        if _should_use_open_enriched_policy(q, best_type, single_document_question)
+        else "strict_rag"
+    )
+
     if best_type == "comparative_synthesis" and single_document_question:
         config["retrieval_mode"] = "article_centric"
         config["retrieval_profile"] = "standard"
@@ -470,8 +503,28 @@ def route_query(query: str) -> RouterOutput:
         config["needs_extractor"] = False
     if answer_style == "exact" and not _asks_for_numeric_value(q):
         config["requires_numbers"] = False
-    if answer_style == "summary" and best_type in {"fact_extraction", "guideline_comparison"}:
+    if answer_style == "summary" and best_type in {"fact_extraction", "guideline_comparison"} and single_document_question:
         config["retrieval_mode"] = "article_centric"
+
+    if answer_policy == "open_enriched":
+        if best_type in {"teaching_explainer", "professional_explainer"}:
+            config["retrieval_mode"] = "mechanistic_synthesis"
+        else:
+            config["retrieval_mode"] = "topic_summary"
+        if best_type in {"study_result_extraction", "research_appraisal", "comparative_synthesis"}:
+            config["retrieval_profile"] = "deep"
+            config["needs_extractor"] = True
+        elif best_type in {"fact_extraction", "guideline_comparison"}:
+            config["retrieval_profile"] = "standard"
+        if best_type == "study_result_extraction" and not _asks_for_numeric_value(q):
+            config["requires_numbers"] = False
+
+    if single_document_question:
+        config["retrieval_mode"] = "article_centric"
+        if config.get("retrieval_profile") == "light":
+            config["retrieval_profile"] = "standard"
+        if best_type in {"study_result_extraction", "research_appraisal", "comparative_synthesis"}:
+            config["retrieval_profile"] = "standard"
 
     return RouterOutput(
         query_type=best_type,
@@ -483,5 +536,5 @@ def route_query(query: str) -> RouterOutput:
         retrieval_profile=config["retrieval_profile"],
         needs_extractor=config["needs_extractor"],
         retrieval_mode=config["retrieval_mode"],
-        answer_policy="open_enriched" if best_type == "professional_explainer" else "strict_rag",
+        answer_policy=answer_policy,
     )

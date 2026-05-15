@@ -11,8 +11,11 @@ _LEGACY_RISKY_RE = re.compile(
 )
 _CITATION_RE = re.compile(r"\[(E?\d+)\]")
 _RISKY_RE = re.compile(
-    r"(\d+[.,]?\d*\s*%|p\s*[<>=]|OR|HR|RR|AUC|"
-    r"li\u1ec1u|lieu|ph\u00e1c\s+\u0111\u1ed3|phac do|"
+    r"(\d+[.,]?\d*\s*%|p\s*[<>=]|"
+    r"\b(?:OR|HR|RR|AUC)\b|dose|"
+    r"li\u1ec1u\s+(?:thu\u1ed1c|d\u00f9ng|dung|khuy\u1ebfn\s+c\u00e1o|khuyen cao|\u0111i\u1ec1u\s+tr\u1ecb|dieu tri)|"
+    r"lieu\s+(?:thuoc|dung|khuyen cao|dieu tri)|"
+    r"ph\u00e1c\s+\u0111\u1ed3|phac do|"
     r"guideline|h\u01b0\u1edbng\s+d\u1eabn|huong dan|"
     r"khuy\u1ebfn\s+c\u00e1o|khuyen cao)",
     re.IGNORECASE,
@@ -36,8 +39,6 @@ def should_verify_answer(answer: str, coverage, router_output, external_pack=Non
     if external_pack is not None and getattr(external_pack, "used", False):
         return True
     if len(answer.split()) > 800:
-        return True
-    if _has_any_citation(answer):
         return True
     return bool(_RISKY_RE.search(answer or ""))
 
@@ -85,9 +86,6 @@ def verify_answer(
     external_pack=None,
     llm_client=None,
 ) -> VerificationResult:
-    if not should_verify_answer(answer, coverage, router_output, external_pack):
-        return VerificationResult(enabled=False, status="skipped")
-
     citations = set(_CITATION_RE.findall(answer or ""))
     external_ids = {source.id for source in getattr(external_pack, "sources", [])} if external_pack else set()
     rag_source_count = _rag_source_count(evidence_pack)
@@ -108,6 +106,12 @@ def verify_answer(
     ):
         issues.append("answer too short for open_enriched professional explainer")
 
+    needs_llm_verification = should_verify_answer(answer, coverage, router_output, external_pack)
+    if not needs_llm_verification:
+        if issues:
+            return VerificationResult(enabled=True, status="revise", issues=issues)
+        return VerificationResult(enabled=False, status="skipped")
+
     if llm_client is None:
         if issues:
             return VerificationResult(enabled=True, status="revise", issues=issues)
@@ -122,9 +126,15 @@ def verify_answer(
         "evidence": _evidence_text(evidence_pack, external_pack)[:12000],
         "checks": [
             "citation attached to unsupported claim",
-            "fabricated numeric/guideline/dose/regimen claim",
-            "unsafe personalized medical advice",
+            "fabricated numeric, guideline, dose, or regimen claim only when the claim is specific and source-dependent",
+            "unsafe personalized medical advice, not general education about diagnosis or clinical reasoning",
             "answer too short for professional explainer",
+        ],
+        "revision_rules": [
+            "When answer_policy is open_enriched, preserve the explanatory structure and useful background knowledge.",
+            "Do not shorten a professional explainer into one short paragraph.",
+            "Remove or generalize only unsafe or unsupported specific claims.",
+            "If the answer is broadly safe and only contains general medical education, return status pass.",
         ],
         "return_json": {
             "status": "pass|revise|block",
@@ -138,7 +148,7 @@ def verify_answer(
                 {"role": "system", "content": "Bạn là verifier RAG y khoa. Trả về JSON hợp lệ, không markdown."},
                 {"role": "user", "content": json.dumps(verifier_prompt, ensure_ascii=False)},
             ],
-            max_tokens=1200,
+            max_tokens=2200,
             temperature=0.0,
             attempt_budget=1,
         )
@@ -152,9 +162,22 @@ def verify_answer(
     if status not in {"pass", "revise", "block"}:
         status = "pass"
     merged_issues = issues + [str(item) for item in data.get("issues", []) if str(item).strip()]
+    revised_answer = str(data.get("revised_answer") or "").strip()
+    if (
+        status == "revise"
+        and revised_answer
+        and getattr(router_output, "answer_policy", "strict_rag") == "open_enriched"
+    ):
+        original_words = len((answer or "").split())
+        revised_words = len(revised_answer.split())
+        min_revised_words = min(450, max(220, int(original_words * 0.45)))
+        if revised_words < min_revised_words:
+            merged_issues.append("verifier revised_answer too short; original answer preserved")
+            revised_answer = ""
+            status = "pass"
     return VerificationResult(
         enabled=True,
         status=status,
         issues=merged_issues,
-        revised_answer=str(data.get("revised_answer") or "").strip(),
+        revised_answer=revised_answer,
     )

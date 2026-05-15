@@ -688,34 +688,19 @@ class QdrantRetriever:
 
         chunks: list[RetrievedChunk] = []
         for candidate in candidates:
-            scroll_filter = _build_article_candidate_filter(candidate)
-            if scroll_filter is None:
-                continue
-            try:
-                scroll_response = self.client.scroll(
-                    collection_name=self.collection,
-                    scroll_filter=scroll_filter,
-                    limit=max(chunks_per_article * 8, chunks_per_article),
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                print(f"[RAG] Lexical article scroll skipped: {exc}")
-                continue
-            points = scroll_response[0] if isinstance(scroll_response, tuple) else getattr(scroll_response, "points", scroll_response) or []
             article_chunks: list[RetrievedChunk] = []
-            for point in points:
-                payload = getattr(point, "payload", {}) or {}
-                text = str(payload.get("text", "") or "")
+            for indexed_chunk in candidate.chunks:
+                payload = dict(getattr(indexed_chunk, "metadata", {}) or {})
+                text = str(getattr(indexed_chunk, "text", "") or "")
                 if not text.strip():
                     continue
                 md = _payload_to_metadata(payload)
                 md["_lexical_article_match"] = candidate.reason
                 md["_lexical_article_score"] = candidate.score
-                score = min(0.99, 0.62 + candidate.score)
+                score = 0.62 + candidate.score
                 article_chunks.append(
                     RetrievedChunk(
-                        id=str(getattr(point, "id", "")),
+                        id=str(getattr(indexed_chunk, "id", "")),
                         text=text,
                         score=score,
                         metadata=md,
@@ -918,10 +903,16 @@ class QdrantRetriever:
             )
 
         if getattr(self, "enable_hybrid", False):
+            if retrieval_mode in {"topic_summary", "mechanistic_synthesis"}:
+                default_lexical_articles = "16" if query_type == "professional_explainer" else "10"
+                default_chunks_per_article = "2"
+            else:
+                default_lexical_articles = "5"
+                default_chunks_per_article = "3"
             lexical_chunks = self._retrieve_lexical_article_chunks(
                 query,
-                limit_articles=int(os.getenv("RAG_HYBRID_LEXICAL_ARTICLES", "5")),
-                chunks_per_article=int(os.getenv("RAG_HYBRID_CHUNKS_PER_ARTICLE", "3")),
+                limit_articles=int(os.getenv("RAG_HYBRID_LEXICAL_ARTICLES", default_lexical_articles)),
+                chunks_per_article=int(os.getenv("RAG_HYBRID_CHUNKS_PER_ARTICLE", default_chunks_per_article)),
             )
             if lexical_chunks:
                 seen_keys = {_stable_text_hash(chunk.text) for chunk in chunks}
@@ -940,6 +931,22 @@ class QdrantRetriever:
                     reverse=True,
                 )
 
+        default_final_chunks = "28" if retrieval_mode in {"topic_summary", "mechanistic_synthesis"} else "64"
+        max_final_chunks = int(os.getenv("RAG_MAX_FINAL_CHUNKS", default_final_chunks))
+        if max_final_chunks and len(chunks) > max_final_chunks:
+            chunks = chunks[:max_final_chunks]
+
+        if self.max_context_tokens:
+            capped_chunks: List[RetrievedChunk] = []
+            used_tokens = 0
+            for chunk in chunks:
+                tks = _estimate_tokens(chunk.text)
+                if used_tokens + tks > self.max_context_tokens:
+                    continue
+                capped_chunks.append(chunk)
+                used_tokens += tks
+            chunks = capped_chunks or chunks[:max_final_chunks]
+
         return chunks
 
     def expand_primary_article_chunks(
@@ -954,6 +961,72 @@ class QdrantRetriever:
         primary article and rerank them inside the article boundary. This helps
         surface direct answer spans that were not in the initial top-k.
         """
+        index = self._get_article_index()
+        if index is not None:
+            article_ids = [
+                str(chunk.metadata.get("article_id", "") or "").strip()
+                for chunk in article.chunks
+                if str(chunk.metadata.get("article_id", "") or "").strip()
+            ]
+            doc_ids = [
+                str(chunk.metadata.get("doc_id", "") or "").strip()
+                for chunk in article.chunks
+                if str(chunk.metadata.get("doc_id", "") or "").strip()
+            ]
+            source_name = next(
+                (
+                    str(chunk.metadata.get("source_name", "") or "").strip()
+                    for chunk in article.chunks
+                    if str(chunk.metadata.get("source_name", "") or "").strip()
+                ),
+                "",
+            )
+            indexed_chunks = index.chunks_for_identity(
+                article_id=article_ids[0] if article_ids else "",
+                doc_id=doc_ids[0] if doc_ids else "",
+                title=article.title or "",
+                source_name=source_name,
+            )
+            if indexed_chunks:
+                expanded = list(article.chunks)
+                seen_hashes = {_stable_text_hash(chunk.text) for chunk in expanded}
+                for indexed_chunk in indexed_chunks:
+                    text = str(getattr(indexed_chunk, "text", "") or "")
+                    if not text.strip():
+                        continue
+                    h = _stable_text_hash(text)
+                    if h in seen_hashes:
+                        continue
+                    seen_hashes.add(h)
+                    expanded.append(
+                        RetrievedChunk(
+                            id=str(getattr(indexed_chunk, "id", "")),
+                            text=text,
+                            score=0.0,
+                            metadata=_payload_to_metadata(getattr(indexed_chunk, "metadata", {}) or {}),
+                        )
+                    )
+                expanded.sort(
+                    key=lambda chunk: (
+                        _same_article_chunk_bonus(query, chunk.text, chunk.metadata),
+                        chunk.score,
+                        -int(chunk.metadata.get("chunk_index", 0) or 0),
+                    ),
+                    reverse=True,
+                )
+                result: List[RetrievedChunk] = []
+                used_tokens = 0
+                for chunk in expanded:
+                    tks = _estimate_tokens(chunk.text)
+                    if self.max_context_tokens and used_tokens + tks > self.max_context_tokens:
+                        continue
+                    result.append(chunk)
+                    used_tokens += tks
+                    if len(result) >= max_chunks:
+                        break
+                if result:
+                    return result
+
         scroll_filter = _build_primary_article_scroll_filter(article)
         if scroll_filter is None:
             return article.chunks
@@ -1034,6 +1107,7 @@ class QdrantRetriever:
         filters: Optional[MetadataFilters] = None,
         query_type: Optional[str] = None,
         answer_style: Optional[str] = None,
+        subquery_retrieval_mode: str = "topic_summary",
     ) -> List[RetrievedChunk]:
         """
         Phase 4: Run multiple sub-queries against Qdrant, merge + dedup.
@@ -1058,7 +1132,7 @@ class QdrantRetriever:
                     query=subq,
                     filters=filters,
                     top_k_override=top_k_per_query,
-                    retrieval_mode="article_centric",  # each sub-query is focused
+                    retrieval_mode=subquery_retrieval_mode,
                     query_type=query_type,
                     answer_style=answer_style,
                 )

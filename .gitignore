@@ -21,6 +21,7 @@ terraform.tfvars
 
 # Python
 __pycache__/
+.venv/
 .pytest_cache/
 .coverage
 __init__/
@@ -38,20 +39,40 @@ jenkins-gke.json
 data/
 rag-data/
 benchmark/
+!benchmark/
+benchmark/*
+!benchmark/datasets/
+benchmark/datasets/*
+!benchmark/datasets/medqa_topic_gold_v2.jsonl
+!benchmark/datasets/medqa_topic_gold_v2_README.md
+!benchmark/datasets/test_results/
+benchmark/datasets/test_results/*
+!benchmark/datasets/test_results/medqa_topic_gold_v2_holdout_summary_2026-05-16_after_verifier.md
+!benchmark/datasets/test_results/medqa_topic_gold_v2_holdout_semantic_summary_2026-05-16_after_verifier.md
+!benchmark/datasets/test_results/vmj_smoke_eval_summary_2026-05-15_v3_bge_m3.md
+!benchmark/datasets/test_results/vmj_full_gold_eval_summary_2026-05-12_deepseek_v4_plus_vmj_v2_strict_r2fix2.md
+!benchmark/datasets/test_results/vmj_full_gold_semantic_lite_summary_2026-05-12_deepseek_v4_plus_vmj_v2_strict_r2fix2.md
+!benchmark/runners/
+benchmark/runners/*
+!benchmark/runners/run_topic_gold_eval.py
+!benchmark/runners/score_topic_gold.py
 notebooks/
 *.json
 *.html
 *.csv
 *.tsv
 *.xlsx
+*.doc
+*.docx
 *.pdf
 *.sqlite
 *.db
 *.parquet
 
 # Exceptions to global ignores
+!BaoCao_DATN_MedQA.docx
 !package.json
 !package-lock.json
 !tsconfig.json
 
-# Allow specific json config files if tracked
+# Allow specific json config files if tracked

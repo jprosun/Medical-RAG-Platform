@@ -33,6 +33,14 @@ def test_should_verify_open_enriched_even_when_evidence_strong():
     )
 
 
+def test_should_not_llm_verify_strong_strict_answer_just_because_it_has_citation():
+    assert not should_verify_answer(
+        "Noi dung nay duoc tai lieu chinh ho tro [1].",
+        _coverage("evidence_strong"),
+        _router("strict_rag"),
+    )
+
+
 def test_verifier_rejects_missing_external_source_id_without_llm():
     result = verify_answer(
         question="Q",

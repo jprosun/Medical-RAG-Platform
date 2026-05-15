@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 _STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that",
-    "trong", "theo", "cua", "của", "mot", "một", "nhung", "những",
-    "nghien", "nghiên", "cuu", "cứu", "danh", "gia", "đánh", "giá",
-    "benh", "bệnh", "nhan", "nhân", "ket", "qua", "kết", "quả",
+    "trong", "theo", "cua", "mot", "nhung", "giua", "dua", "tren",
+    "nghien", "cuu", "danh", "gia", "benh", "nhan", "ket", "qua",
+}
+_KEEP_SHORT_TOKENS = {"vu", "ct", "mr", "er", "pr", "ivf"}
+_CRITICAL_TERMS = {
+    "phyllode", "phyllodes", "carcinom", "carcinoma", "buong", "trung",
+    "ihc", "her2", "ki67", "brca", "bevacizumab",
 }
 
 
@@ -27,12 +32,16 @@ def _tokens(text: str) -> set[str]:
     return {
         token
         for token in re.findall(r"\w+", _normalize(text), flags=re.UNICODE)
-        if len(token) >= 3 and token not in _STOPWORDS
+        if (len(token) >= 3 or token in _KEEP_SHORT_TOKENS) and token not in _STOPWORDS
     }
 
 
 def _phrases(text: str) -> list[str]:
-    ordered = [tok for tok in re.findall(r"\w+", _normalize(text), flags=re.UNICODE) if len(tok) >= 3 and tok not in _STOPWORDS]
+    ordered = [
+        tok
+        for tok in re.findall(r"\w+", _normalize(text), flags=re.UNICODE)
+        if (len(tok) >= 3 or tok in _KEEP_SHORT_TOKENS) and tok not in _STOPWORDS
+    ]
     result: list[str] = []
     for size in (5, 4, 3, 2):
         for i in range(len(ordered) - size + 1):
@@ -46,6 +55,27 @@ def _acronyms(text: str) -> set[str]:
     return {match.group(0).lower() for match in re.finditer(r"\b[A-Z][A-Z0-9]{1,6}\b", text or "")}
 
 
+def _expand_query_aliases(query: str) -> str:
+    q_norm = _normalize(query)
+    aliases: list[str] = []
+    if "diep the" in q_norm or "u diep" in q_norm:
+        aliases.append("phyllode phyllodes")
+    if "hoa mo mien dich" in q_norm:
+        aliases.append("ihc immunohistochemistry")
+    if "buong trung" in q_norm:
+        aliases.append("ovarian ovary")
+    if not aliases:
+        return query
+    return f"{query} {' '.join(aliases)}"
+
+
+@dataclass
+class IndexedArticleChunk:
+    id: str
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class ArticleCandidate:
     article_key: str
@@ -56,15 +86,36 @@ class ArticleCandidate:
     source_url: str = ""
     score: float = 0.0
     reason: str = ""
+    chunks: list[IndexedArticleChunk] = field(default_factory=list)
 
 
 class ArticleLexicalIndex:
     def __init__(self, articles: list[dict[str, Any]]):
         self.articles = articles
+        self._by_article_id = {
+            str(article.get("article_id") or ""): article
+            for article in articles
+            if str(article.get("article_id") or "")
+        }
+        self._by_doc_id = {
+            str(article.get("doc_id") or ""): article
+            for article in articles
+            if str(article.get("doc_id") or "")
+        }
+        self._by_title_source = {
+            (
+                _normalize(str(article.get("title") or "")),
+                _normalize(str(article.get("source_name") or "")),
+            ): article
+            for article in articles
+            if str(article.get("title") or "")
+        }
 
     @classmethod
     def from_jsonl(cls, path: str | Path) -> "ArticleLexicalIndex":
         articles: dict[str, dict[str, Any]] = {}
+        max_chunks_per_article = max(1, int(os.getenv("RAG_ARTICLE_INDEX_MAX_CHUNKS_PER_ARTICLE", "12")))
+        max_chunk_chars = max(400, int(os.getenv("RAG_ARTICLE_INDEX_MAX_CHUNK_CHARS", "3500")))
         p = Path(path)
         with open(p, "r", encoding="utf-8") as fh:
             for raw in fh:
@@ -94,17 +145,64 @@ class ArticleLexicalIndex:
                         "institution": str(metadata.get("institution") or ""),
                         "source_id": str(metadata.get("source_id") or ""),
                         "text": "",
+                        "chunks": [],
                     },
                 )
-                if not current.get("text") and row.get("text"):
-                    current["text"] = str(row.get("text") or "")[:800]
+                text = str(row.get("text") or "")
+                if not current.get("text") and text:
+                    current["text"] = text[:800]
+                chunks = current.setdefault("chunks", [])
+                if len(chunks) < max_chunks_per_article and text:
+                    chunk_metadata = {
+                        key: metadata.get(key)
+                        for key in (
+                            "source_name", "source_id", "doc_type", "specialty", "audience",
+                            "trust_tier", "language", "title", "canonical_title", "section_title",
+                            "section_type", "chunk_role", "source_url", "updated_at", "heading_path",
+                            "tags", "doc_id", "article_id", "institution", "chunk_index",
+                        )
+                        if key in metadata
+                    }
+                    chunks.append(
+                        IndexedArticleChunk(
+                            id=str(row.get("id") or ""),
+                            text=text[:max_chunk_chars],
+                            metadata=chunk_metadata,
+                        )
+                    )
         return cls(list(articles.values()))
 
+    def chunks_for_identity(
+        self,
+        *,
+        article_id: str = "",
+        doc_id: str = "",
+        title: str = "",
+        source_name: str = "",
+    ) -> list[IndexedArticleChunk]:
+        article = None
+        if article_id:
+            article = self._by_article_id.get(article_id)
+        if article is None and doc_id:
+            article = self._by_doc_id.get(doc_id)
+        if article is None and title:
+            article = self._by_title_source.get((_normalize(title), _normalize(source_name)))
+            if article is None and not source_name:
+                title_norm = _normalize(title)
+                for (candidate_title, _candidate_source), candidate_article in self._by_title_source.items():
+                    if candidate_title == title_norm:
+                        article = candidate_article
+                        break
+        if not article:
+            return []
+        return list(article.get("chunks") or [])
+
     def search(self, query: str, *, limit: int = 5) -> list[ArticleCandidate]:
-        q_norm = _normalize(query)
-        q_tokens = _tokens(query)
-        q_phrases = _phrases(query)
-        q_acronyms = _acronyms(query)
+        expanded_query = _expand_query_aliases(query)
+        q_norm = _normalize(expanded_query)
+        q_tokens = _tokens(expanded_query)
+        q_phrases = _phrases(expanded_query)
+        q_acronyms = _acronyms(expanded_query)
         scored: list[ArticleCandidate] = []
 
         for article in self.articles:
@@ -123,6 +221,20 @@ class ArticleLexicalIndex:
             reasons: list[str] = []
             if overlap:
                 reasons.append(f"token_overlap={overlap}")
+
+            critical_overlap = (q_tokens & h_tokens) & _CRITICAL_TERMS
+            if critical_overlap:
+                score += 0.28 * len(critical_overlap)
+                reasons.append(f"critical={','.join(sorted(critical_overlap))}")
+                if critical_overlap & {"phyllode", "phyllodes"}:
+                    score += 1.0
+                    reasons.append("critical_entity=phyllodes")
+
+            title_tokens = _tokens(title)
+            title_overlap = q_tokens & title_tokens
+            if title_overlap:
+                score += min(0.06 * len(title_overlap), 0.36)
+                reasons.append(f"title_overlap={len(title_overlap)}")
 
             for phrase in q_phrases:
                 if phrase and phrase in h_norm:
@@ -151,6 +263,7 @@ class ArticleLexicalIndex:
                     source_url=str(article.get("source_url") or ""),
                     score=round(score, 4),
                     reason="; ".join(reasons[:4]),
+                    chunks=list(article.get("chunks") or []),
                 )
             )
 

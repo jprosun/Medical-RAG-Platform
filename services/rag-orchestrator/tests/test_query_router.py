@@ -34,4 +34,5 @@ def test_routes_list_like_fact_question_to_summary_answer_style():
         "Ở người cao tuổi bị thoái hóa khớp, những biện pháp can thiệp sớm nào được khuyến cáo để làm chậm tiến triển bệnh và giảm triệu chứng?"
     )
     assert routed.answer_style == "summary"
-    assert routed.retrieval_mode == "article_centric"
+    assert routed.answer_policy == "open_enriched"
+    assert routed.retrieval_mode == "topic_summary"

@@ -1,8 +1,10 @@
 import sys, os
+import json
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from types import SimpleNamespace
 
+from app.article_lexical_index import ArticleLexicalIndex
 from app.retriever import QdrantRetriever
 
 
@@ -152,3 +154,41 @@ def test_retriever_candidate_pool_is_larger_than_prompt_budget():
     chunks = retriever.retrieve("nhoi mau nao")
 
     assert len(chunks) == 3
+
+
+def test_article_lexical_index_returns_indexed_chunks_without_qdrant_scroll(tmp_path):
+    export_path = tmp_path / "kaggle_embedding_input.jsonl"
+    rows = [
+        {
+            "id": "phyllodes-0",
+            "text": "U phyllodes vu la u xo bieu mo, chan doan dua vao giai phau benh va hoa mo mien dich.",
+            "metadata": {
+                "article_id": "a-phyllodes",
+                "doc_id": "d-phyllodes",
+                "title": "U PHYLLODE TUYEN VU KHONG LO",
+                "canonical_title": "U PHYLLODE TUYEN VU KHONG LO",
+                "source_name": "vmj_ojs",
+                "chunk_index": 0,
+            },
+        },
+        {
+            "id": "phyllodes-1",
+            "text": "Sinh thiet day du giup phan biet u diep the voi cac ton thuong vu khac.",
+            "metadata": {
+                "article_id": "a-phyllodes",
+                "doc_id": "d-phyllodes",
+                "title": "U PHYLLODE TUYEN VU KHONG LO",
+                "canonical_title": "U PHYLLODE TUYEN VU KHONG LO",
+                "source_name": "vmj_ojs",
+                "chunk_index": 1,
+            },
+        },
+    ]
+    export_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+
+    index = ArticleLexicalIndex.from_jsonl(export_path)
+    candidates = index.search("vi sao sinh thiet day du trong u phyllode vu", limit=1)
+
+    assert candidates
+    assert candidates[0].article_id == "a-phyllodes"
+    assert [chunk.id for chunk in candidates[0].chunks] == ["phyllodes-0", "phyllodes-1"]

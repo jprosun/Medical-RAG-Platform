@@ -70,6 +70,56 @@ def _stable_text_hash(text: str) -> str:
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
+def _chunk_article_key(chunk: "RetrievedChunk") -> str:
+    md = getattr(chunk, "metadata", {}) or {}
+    for field_name in ("article_id", "doc_id", "source_url"):
+        value = str(md.get(field_name, "") or "").strip()
+        if value:
+            return f"{field_name}:{value}"
+    title = str(md.get("canonical_title") or md.get("title") or "").strip().lower()
+    source = str(md.get("source_name") or md.get("source_id") or "").strip().lower()
+    return f"title:{source}:{title}" if title else f"chunk:{getattr(chunk, 'id', '')}"
+
+
+def _diversify_chunks_by_article(
+    chunks: List["RetrievedChunk"],
+    max_per_article: int = 2,
+    min_articles: int = 8,
+) -> List["RetrievedChunk"]:
+    """Interleave chunks so catalog/source-discovery answers see more documents."""
+    if not chunks:
+        return chunks
+    grouped: Dict[str, List["RetrievedChunk"]] = {}
+    order: List[str] = []
+    for chunk in chunks:
+        key = _chunk_article_key(chunk)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(chunk)
+    if len(order) <= 1:
+        return chunks
+
+    diversified: List["RetrievedChunk"] = []
+    used_hashes: set[str] = set()
+    for round_idx in range(max_per_article):
+        for key in order:
+            bucket = grouped[key]
+            if round_idx >= len(bucket):
+                continue
+            candidate = bucket[round_idx]
+            h = _stable_text_hash(candidate.text)
+            if h in used_hashes:
+                continue
+            diversified.append(candidate)
+            used_hashes.add(h)
+
+    remaining = [chunk for chunk in chunks if _stable_text_hash(chunk.text) not in used_hashes]
+    if len(order) >= min_articles:
+        return diversified + remaining
+    return chunks
+
+
 def _normalize_for_matching(text: str) -> str:
     base = unicodedata.normalize("NFKD", text or "")
     stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
@@ -904,8 +954,12 @@ class QdrantRetriever:
 
         if getattr(self, "enable_hybrid", False):
             if retrieval_mode in {"topic_summary", "mechanistic_synthesis"}:
-                default_lexical_articles = "16" if query_type == "professional_explainer" else "10"
-                default_chunks_per_article = "2"
+                if query_type == "source_discovery":
+                    default_lexical_articles = "24"
+                    default_chunks_per_article = "2"
+                else:
+                    default_lexical_articles = "16" if query_type == "professional_explainer" else "10"
+                    default_chunks_per_article = "2"
             else:
                 default_lexical_articles = "5"
                 default_chunks_per_article = "3"
@@ -931,7 +985,16 @@ class QdrantRetriever:
                     reverse=True,
                 )
 
+        if query_type == "source_discovery":
+            chunks = _diversify_chunks_by_article(
+                chunks,
+                max_per_article=int(os.getenv("RAG_SOURCE_DISCOVERY_MAX_CHUNKS_PER_ARTICLE", "2")),
+                min_articles=int(os.getenv("RAG_SOURCE_DISCOVERY_MIN_ARTICLES", "4")),
+            )
+
         default_final_chunks = "28" if retrieval_mode in {"topic_summary", "mechanistic_synthesis"} else "64"
+        if query_type == "source_discovery":
+            default_final_chunks = "36"
         max_final_chunks = int(os.getenv("RAG_MAX_FINAL_CHUNKS", default_final_chunks))
         if max_final_chunks and len(chunks) > max_final_chunks:
             chunks = chunks[:max_final_chunks]

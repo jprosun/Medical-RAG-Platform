@@ -27,6 +27,7 @@ def _client():
         timeout_s=5,
         retries=1,
         retry_backoff_s=0,
+        use_keepalive=False,
     )
 
 
@@ -95,6 +96,7 @@ def test_deepseek_payload_disables_thinking_mode(monkeypatch):
         timeout_s=5,
         retries=0,
         retry_backoff_s=0,
+        use_keepalive=False,
     )
     captured = {}
 

@@ -36,3 +36,11 @@ def test_routes_list_like_fact_question_to_summary_answer_style():
     assert routed.answer_style == "summary"
     assert routed.answer_policy == "open_enriched"
     assert routed.retrieval_mode == "topic_summary"
+
+
+def test_routes_document_catalog_question_to_source_discovery():
+    routed = route_query("Ung thư vú là gì? Có những tài liệu nào nói về ung thư vú?")
+    assert routed.query_type == "source_discovery"
+    assert routed.answer_policy == "open_enriched"
+    assert routed.retrieval_mode == "topic_summary"
+    assert routed.retrieval_profile == "deep"

@@ -6,6 +6,12 @@ def test_chat_request_valid():
     req = ChatRequest(message="hello")
     assert req.message == "hello"
     assert req.session_id is None
+    assert req.answer_mode is None
+
+
+def test_chat_request_answer_mode_optional():
+    req = ChatRequest(message="hello", answer_mode="thinking")
+    assert req.answer_mode == "thinking"
 
 
 def test_chat_request_invalid():

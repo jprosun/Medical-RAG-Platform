@@ -4,6 +4,7 @@ import os
 import re
 
 from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -28,6 +29,7 @@ from .conflict_detector import detect_conflicts
 from .coverage_scorer import score_coverage
 from .answer_planner import build_answer_plan, format_answer_plan_for_prompt, should_plan_answer
 from .answer_verifier import verify_answer
+from .pipeline_cache import pipeline_cache, stable_hash
 from .external_source_resolver import (
     ExternalEvidencePack,
     format_external_sources_for_prompt,
@@ -76,6 +78,242 @@ def _build_optional_llm_client(flag_name: str, default: bool = True):
     if not _env_flag(flag_name, default=default):
         return None
     return build_kserve_client_from_env()
+
+
+def _normalize_answer_mode(raw: str | None) -> str:
+    value = (raw or "standard").strip().lower()
+    aliases = {
+        "normal": "standard",
+        "default": "standard",
+        "balanced": "standard",
+        "full": "standard",
+        "brief": "standard",
+        "short": "standard",
+        "ngan": "standard",
+        "strict": "standard",
+        "strict_rag": "standard",
+        "evidence_only": "standard",
+        "sources_only": "standard",
+        "deep": "thinking",
+        "detailed": "thinking",
+        "chuyen_sau": "thinking",
+        "think": "thinking",
+        "thinking": "thinking",
+    }
+    if value in {"standard", "thinking"}:
+        return value
+    return aliases.get(value, "standard")
+
+
+def _apply_answer_mode(router_output, answer_mode: str) -> None:
+    router_output.answer_mode = answer_mode
+    if answer_mode == "thinking":
+        router_output.answer_policy = "open_enriched"
+        router_output.retrieval_profile = "deep"
+        router_output.needs_extractor = True
+        return
+
+    if getattr(router_output, "query_type", "") in {
+        "fact_extraction",
+        "professional_explainer",
+        "teaching_explainer",
+        "source_discovery",
+    }:
+        router_output.needs_extractor = False
+    if getattr(router_output, "query_type", "") == "source_discovery":
+        router_output.retrieval_profile = "standard"
+    if getattr(router_output, "query_type", "") in {"professional_explainer", "teaching_explainer"}:
+        router_output.retrieval_mode = "topic_summary"
+        router_output.retrieval_profile = "standard"
+
+
+def _answer_mode_instruction(answer_mode: str) -> str:
+    if answer_mode == "thinking":
+        return (
+            "UI_ANSWER_MODE: thinking\n"
+            "- Trả lời thật chi tiết và có chiều sâu học thuật; ưu tiên 1100-1700 từ khi câu hỏi phù hợp.\n"
+            "- Khai thác tối đa evidence RAG đã truy hồi: dùng nhiều nguồn/chunk liên quan hơn, gắn citation [n] sát từng claim được evidence hỗ trợ.\n"
+            "- Nếu EVIDENCE có tài liệu phụ [2], [3]... liên quan, bắt buộc dùng nhiều citation khác nhau thay vì chỉ dựa vào [1].\n"
+            "- Có thể bổ sung kiến thức nền/chuyên sâu ngoài RAG để giải thích cơ chế, bối cảnh, ý nghĩa lâm sàng và liên hệ học thuật; phần này không được gắn citation giả.\n"
+            "- Với số liệu, guideline, liều thuốc, phác đồ hoặc khuyến nghị cá thể hóa: chỉ nêu khi có RAG/external source rõ; nếu không có nguồn thì chuyển về mô tả tổng quát hoặc bỏ claim.\n"
+            "- Giữ kết luận ngắn ở cuối cùng."
+        )
+    return (
+        "UI_ANSWER_MODE: standard\n"
+        "- Trả lời đầy đủ ý, rõ ràng cho người dùng có chuyên môn; ưu tiên 500-850 từ khi câu hỏi là lý thuyết/giải thích.\n"
+        "- Evidence RAG là nền chính: mọi claim dùng tài liệu truy hồi phải gắn citation [n] sát claim; không gắn citation cho phần kiến thức nền không có trong evidence.\n"
+        "- Có thể bổ sung kiến thức nền an toàn để làm câu trả lời dễ hiểu hơn, nhưng không tự bịa số liệu, guideline mới, liều thuốc, phác đồ hoặc lời khuyên cá thể hóa.\n"
+        "- Tránh các đoạn phủ định dài kiểu 'tài liệu không đề cập'; nếu evidence yếu, nói ngắn gọn giới hạn rồi vẫn giải thích nền an toàn.\n"
+        "- Không viết quá dài như Thinking; ưu tiên câu trả lời nhanh, có cấu trúc và đủ ý chính.\n"
+        "- Giữ kết luận ngắn ở cuối cùng."
+    )
+
+
+def _source_discovery_instruction() -> str:
+    return (
+        "QUERY_INTENT: source_discovery\n"
+        "- Người dùng đang hỏi vừa nội dung chủ đề vừa hỏi có những tài liệu/nguồn nào liên quan.\n"
+        "- Trả lời định nghĩa/tổng quan ngắn ở đầu, sau đó bắt buộc có mục 'Các tài liệu truy hồi liên quan'.\n"
+        "- Trong mục tài liệu, liệt kê nhiều tài liệu khác nhau nếu có: [n] Tên tài liệu - nguồn - nội dung chính - vì sao liên quan.\n"
+        "- Với Standard: ưu tiên 3-5 tài liệu liên quan nhất, mô tả ngắn và rõ.\n"
+        "- Với Thinking: ưu tiên 6-10 tài liệu nếu evidence có, nhóm theo chủ đề như chẩn đoán hình ảnh, điều trị, tái phát/di căn, tâm lý-xã hội, chi phí/y tế công cộng; sau đó phân tích sâu ý nghĩa học thuật của từng nhóm.\n"
+        "- Không nói 'tài liệu truy hồi duy nhất' nếu evidence có nhiều article_id/title/source khác nhau.\n"
+        "- Nếu chỉ có một tài liệu thật sự liên quan trong evidence, nói 'trong lần truy hồi này nổi bật nhất là...' thay vì khẳng định toàn bộ kho chỉ có một tài liệu.\n"
+        "- Với mode thinking, ưu tiên tổng hợp từ nhiều tài liệu và dùng citation đa nguồn khi evidence hỗ trợ."
+    )
+
+
+def _chunk_fingerprint(chunk) -> dict:
+    metadata = getattr(chunk, "metadata", {}) or {}
+    return {
+        "id": getattr(chunk, "id", ""),
+        "text_hash": stable_hash(getattr(chunk, "text", "") or ""),
+        "title": metadata.get("title") or metadata.get("canonical_title") or "",
+        "article_id": metadata.get("article_id") or "",
+        "doc_id": metadata.get("doc_id") or "",
+        "source_name": metadata.get("source_name") or "",
+        "section_title": metadata.get("section_title") or "",
+    }
+
+
+def _article_fingerprint(article) -> dict:
+    return {
+        "title": getattr(article, "title", ""),
+        "chunks": [_chunk_fingerprint(chunk) for chunk in getattr(article, "chunks", []) or []],
+    }
+
+
+def _aggregated_fingerprint(aggregated) -> dict:
+    return {
+        "primary": _article_fingerprint(getattr(aggregated, "primary", None)),
+        "secondary": [
+            _article_fingerprint(article)
+            for article in getattr(aggregated, "secondary", []) or []
+        ],
+    }
+
+
+def _ordered_chunks_for_response(chunks: list, aggregated) -> list:
+    """Order response chunks by prompt citation order for the UI source panel."""
+    ordered = []
+    seen: set[str] = set()
+
+    def add_chunk(chunk) -> None:
+        key = getattr(chunk, "id", "") or stable_hash(getattr(chunk, "text", "") or "")
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(chunk)
+
+    primary = getattr(aggregated, "primary", None)
+    for chunk in getattr(primary, "chunks", []) or []:
+        add_chunk(chunk)
+
+    for article in getattr(aggregated, "secondary", []) or []:
+        for chunk in getattr(article, "chunks", []) or []:
+            add_chunk(chunk)
+
+    for chunk in chunks or []:
+        add_chunk(chunk)
+
+    return ordered
+
+
+def _article_source_name(article) -> str:
+    for chunk in getattr(article, "chunks", []) or []:
+        md = getattr(chunk, "metadata", {}) or {}
+        name = md.get("source_name") or md.get("source_id") or ""
+        if name:
+            return str(name)
+    return "RAG"
+
+
+def _format_reranked_articles_for_prompt(aggregated, answer_mode: str) -> str:
+    articles = []
+    primary = getattr(aggregated, "primary", None)
+    if primary and getattr(primary, "title", ""):
+        articles.append(primary)
+    articles.extend(getattr(aggregated, "secondary", []) or [])
+    if not articles:
+        return ""
+
+    max_articles = 10 if answer_mode == "thinking" else 5
+    lines = [
+        "RERANKED_INTERNAL_ARTICLES:",
+        "Các tài liệu dưới đây đã được article-level rerank từ retrieval. Dùng chúng theo citation [n] nếu nội dung liên quan thật sự:",
+    ]
+    for idx, article in enumerate(articles[:max_articles], start=1):
+        title = getattr(article, "title", "") or "Untitled"
+        source = _article_source_name(article)
+        score = getattr(article, "article_score", 0.0)
+        reason = getattr(article, "selected_reason", "") or ""
+        lines.append(f"[{idx}] {title} | source={source} | score={score:.3f} | reason={reason}")
+    if answer_mode == "thinking" and len(articles) > 1:
+        lines.append(
+            "Thinking requirement: nếu các tài liệu phụ có nội dung phù hợp, hãy tổng hợp tối thiểu 3 nguồn nội bộ khác nhau; không chỉ dùng [1]."
+        )
+    return "\n".join(lines)
+
+
+def _router_fingerprint(router_output) -> dict:
+    return {
+        "query_type": getattr(router_output, "query_type", ""),
+        "depth": getattr(router_output, "depth", ""),
+        "needs_extractor": getattr(router_output, "needs_extractor", False),
+        "retrieval_profile": getattr(router_output, "retrieval_profile", ""),
+        "retrieval_mode": getattr(router_output, "retrieval_mode", ""),
+        "answer_policy": getattr(router_output, "answer_policy", ""),
+        "answer_style": getattr(router_output, "answer_style", ""),
+        "answer_mode": getattr(router_output, "answer_mode", ""),
+    }
+
+
+def _coverage_fingerprint(coverage) -> dict:
+    return {
+        "coverage_level": getattr(coverage, "coverage_level", ""),
+        "coverage_mode": getattr(coverage, "coverage_mode", ""),
+        "allow_external": getattr(coverage, "allow_external", False),
+        "force_abstain_parts": getattr(coverage, "force_abstain_parts", []) or [],
+        "missing_requirements": getattr(coverage, "missing_requirements", []) or [],
+        "confidence_ceiling": getattr(coverage, "confidence_ceiling", ""),
+        "unsupported_concepts": getattr(coverage, "unsupported_concepts", []) or [],
+        "concept_evidence_gap": getattr(coverage, "concept_evidence_gap", False),
+        "allowed_answer_scope": getattr(coverage, "allowed_answer_scope", ""),
+    }
+
+
+def _external_fingerprint(external_pack) -> dict:
+    sources = []
+    for source in getattr(external_pack, "sources", []) or []:
+        sources.append({
+            "id": getattr(source, "id", ""),
+            "title": getattr(source, "title", ""),
+            "url": getattr(source, "url", ""),
+            "snippet_hash": stable_hash(getattr(source, "snippet", "") or ""),
+        })
+    return {
+        "status": getattr(external_pack, "status", ""),
+        "used": getattr(external_pack, "used", False),
+        "sources": sources,
+    }
+
+
+def _should_use_llm_verifier(answer_mode: str, answer: str, coverage, router_output, external_pack) -> bool:
+    if answer_mode == "thinking":
+        return True
+    if external_pack is not None and getattr(external_pack, "sources", []):
+        return True
+    if getattr(router_output, "requires_numbers", False):
+        return True
+    if getattr(coverage, "coverage_mode", "") == "retrieval_failed":
+        return True
+    return bool(
+        re.search(
+            r"(\bliều\b|\blieu\b|phác\s*đồ|phac\s*do|guideline|hướng\s*dẫn|huong\s*dan|khuyến\s*cáo|khuyen\s*cao)",
+            answer or "",
+            re.IGNORECASE,
+        )
+    )
 
 
 def _should_expand_primary_article(router_output, query: str) -> bool:
@@ -408,6 +646,22 @@ def generate_and_save_title(session_id: str, prompt: str):
 
 app = FastAPI(title="Medical RAG Orchestrator")
 
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8501,http://127.0.0.1:8501",
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Initialize OpenTelemetry tracing (FastAPI + outbound clients)
 setup_tracing(
     app=app,
@@ -547,9 +801,14 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
     try:
         # Root span for this chat request
         with tracer.start_as_current_span("rag.chat") as root_span:
+            request_t0 = time.time()
+            timings_ms: dict[str, float] = {}
+            cache_info: dict[str, bool] = {}
             session_id = req.session_id or str(uuid4())
+            answer_mode = _normalize_answer_mode(req.answer_mode)
             request.state.session_id = session_id
             root_span.set_attribute("session.id", session_id)
+            root_span.set_attribute("ui.answer_mode", answer_mode)
 
             # load chat history BEFORE appending the new message
             with tracer.start_as_current_span("session.load_history") as span:
@@ -568,6 +827,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 session_store.append(session_id, "user", req.message)
 
             # query rewriting for multi-turn conversations
+            rewrite_t0 = time.time()
             with tracer.start_as_current_span("query.rewrite") as span:
                 kserve_for_rewrite = _build_optional_llm_client(
                     "LLM_REWRITER_ENABLED",
@@ -579,18 +839,28 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("query.original", req.message)
                 span.set_attribute("query.rewritten", search_query)
                 span.set_attribute("query.was_rewritten", search_query != req.message)
+            timings_ms["query_rewrite_ms"] = round((time.time() - rewrite_t0) * 1000.0, 2)
 
             # ── 1. Query Router (rule-based, no LLM) ──────────────
             with tracer.start_as_current_span("query.route") as span:
                 router_output = route_query(search_query)
+                _apply_answer_mode(router_output, answer_mode)
                 span.set_attribute("router.query_type", router_output.query_type)
                 span.set_attribute("router.depth", router_output.depth)
                 span.set_attribute("router.needs_extractor", router_output.needs_extractor)
                 span.set_attribute("router.retrieval_profile", router_output.retrieval_profile)
+                span.set_attribute("router.answer_mode", answer_mode)
 
             # ── 2. Retrieve with profile-based top_k ─────────────
             _PROFILE_TOP_K = {"light": 8, "standard": 12, "deep": 20}
             profile_top_k = _PROFILE_TOP_K.get(router_output.retrieval_profile, 12)
+            if getattr(router_output, "query_type", "") == "source_discovery":
+                if answer_mode == "thinking":
+                    profile_top_k = max(profile_top_k, int(os.getenv("RAG_SOURCE_DISCOVERY_THINKING_TOP_K", "40")))
+                else:
+                    profile_top_k = max(profile_top_k, int(os.getenv("RAG_SOURCE_DISCOVERY_STANDARD_TOP_K", "18")))
+            elif answer_mode == "thinking":
+                profile_top_k = max(profile_top_k, int(os.getenv("RAG_THINKING_TOP_K", "32")))
 
             with tracer.start_as_current_span("retriever.build"):
                 retriever = build_retriever_from_env()
@@ -640,6 +910,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             RAG_RETRIEVAL_LATENCY_SECONDS.observe(retrieval_ms / 1000.0)
             request.state.retrieval_ms = retrieval_ms
             request.state.chunks_returned = len(chunks)
+            timings_ms["retrieval_ms"] = retrieval_ms
 
             est_tokens = sum(max(1, len(c.text) // 4) for c in chunks)
             RAG_CONTEXT_TOKENS.observe(est_tokens)
@@ -685,6 +956,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("article.primary_expanded_chunks", len(aggregated.primary.chunks))
 
             # ── 4. Evidence Extraction (conditional) ─────────────
+            extract_t0 = time.time()
             with tracer.start_as_current_span("evidence.extract") as span:
                 extractor_enabled = _env_flag("LLM_EXTRACTOR_ENABLED", default=False)
                 kserve_for_extract = None
@@ -693,11 +965,45 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         "LLM_EXTRACTOR_ENABLED",
                         default=False,
                     )
-                evidence_pack = extract_evidence(
-                    aggregated, search_query, router_output, llm_client=kserve_for_extract
-                )
+                evidence_cache_hit = False
+                evidence_cache_key = None
+                evidence_pack = None
+                if (
+                    kserve_for_extract is not None
+                    and _env_flag("EVIDENCE_CACHE_ENABLED", default=True)
+                ):
+                    evidence_cache_key = pipeline_cache.key(
+                        "evidence_extract",
+                        {
+                            "query": search_query,
+                            "router": _router_fingerprint(router_output),
+                            "aggregated": _aggregated_fingerprint(aggregated),
+                            "model": os.getenv("LLM_MODEL_ID", ""),
+                            "extractor_max_tokens": os.getenv("EXTRACTOR_MAX_TOKENS", "800"),
+                            "extractor_temperature": os.getenv("EXTRACTOR_TEMPERATURE", "0.1"),
+                            "thinking_mode": os.getenv("LLM_THINKING_MODE", ""),
+                        },
+                    )
+                    cached_evidence = pipeline_cache.get(evidence_cache_key)
+                    if cached_evidence is not None:
+                        evidence_pack = cached_evidence
+                        evidence_cache_hit = True
+
+                if evidence_pack is None:
+                    evidence_pack = extract_evidence(
+                        aggregated, search_query, router_output, llm_client=kserve_for_extract
+                    )
+                    if (
+                        evidence_cache_key
+                        and getattr(evidence_pack, "extractor_used", False)
+                    ):
+                        pipeline_cache.set(evidence_cache_key, evidence_pack)
+
+                cache_info["evidence_extract_hit"] = evidence_cache_hit
+                span.set_attribute("evidence.cache_hit", evidence_cache_hit)
                 span.set_attribute("evidence.extractor_used", evidence_pack.extractor_used)
                 span.set_attribute("evidence.numbers_found", len(evidence_pack.primary_source.numbers))
+            timings_ms["evidence_extract_ms"] = round((time.time() - extract_t0) * 1000.0, 2)
 
             # ── 4.5. Evidence Normalization & Conflict Detection (Phase 2) 
             with tracer.start_as_current_span("evidence.normalize") as span:
@@ -720,7 +1026,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
             with tracer.start_as_current_span("answer.plan") as span:
                 planner_llm = None
-                if should_plan_answer(router_output, coverage):
+                if answer_mode == "thinking" and should_plan_answer(router_output, coverage):
                     planner_llm = _build_optional_llm_client(
                         "LLM_ANSWER_PLANNER_ENABLED",
                         default=False,
@@ -733,6 +1039,17 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     llm_client=planner_llm,
                 )
                 answer_plan_text = format_answer_plan_for_prompt(answer_plan)
+                reranked_articles_text = _format_reranked_articles_for_prompt(aggregated, answer_mode)
+                mode_instruction = _answer_mode_instruction(answer_mode)
+                if getattr(router_output, "query_type", "") == "source_discovery":
+                    mode_instruction = f"{mode_instruction}\n\n{_source_discovery_instruction()}"
+                if reranked_articles_text:
+                    mode_instruction = f"{mode_instruction}\n\n{reranked_articles_text}"
+                answer_plan_text = (
+                    f"{answer_plan_text}\n\n{mode_instruction}"
+                    if answer_plan_text
+                    else mode_instruction
+                )
                 span.set_attribute("answer_plan.enabled", answer_plan.enabled)
                 span.set_attribute("answer_plan.status", answer_plan.status)
 
@@ -784,14 +1101,20 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     kserve = build_kserve_client_from_env()
 
                     if kserve:
-                        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+                        base_max_tokens = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+                        if answer_mode == "thinking":
+                            max_tokens = int(os.getenv("LLM_THINKING_MAX_TOKENS", str(max(base_max_tokens, 4096))))
+                            answer_attempt_budget = int(os.getenv("THINKING_ANSWER_MAX_ATTEMPTS", os.getenv("ANSWER_MAX_ATTEMPTS", "2")))
+                        else:
+                            max_tokens = int(os.getenv("LLM_STANDARD_MAX_TOKENS", str(min(base_max_tokens, 1800))))
+                            answer_attempt_budget = int(os.getenv("STANDARD_ANSWER_MAX_ATTEMPTS", "1"))
                         temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
                         try:
                             answer = kserve.generate(
                                 messages_payload,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
-                                attempt_budget=int(os.getenv("ANSWER_MAX_ATTEMPTS", "2")),
+                                attempt_budget=answer_attempt_budget,
                             )
                         except UpstreamRateLimitError as exc:
                             RAG_FALLBACK_TOTAL.inc()
@@ -840,24 +1163,71 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
             RAG_GENERATION_LATENCY_SECONDS.observe(llm_ms / 1000.0)
             request.state.llm_ms = llm_ms
+            timings_ms["llm_answer_ms"] = llm_ms
 
             verification_status = "skipped"
             verification_issues = []
+            verifier_ms = 0.0
             if _env_flag("LLM_VERIFIER_ENABLED", default=True) and not degraded_mode:
+                verifier_t0 = time.time()
                 with tracer.start_as_current_span("answer.verify") as span:
-                    verifier_llm = _build_optional_llm_client(
-                        "LLM_VERIFIER_ENABLED",
-                        default=True,
+                    use_llm_verifier = _should_use_llm_verifier(
+                        answer_mode,
+                        answer,
+                        coverage,
+                        router_output,
+                        external_pack,
                     )
-                    verification = verify_answer(
-                        question=search_query,
-                        answer=answer,
-                        evidence_pack=evidence_pack,
-                        coverage=coverage,
-                        router_output=router_output,
-                        external_pack=external_pack,
-                        llm_client=verifier_llm,
+                    verifier_llm = (
+                        _build_optional_llm_client("LLM_VERIFIER_ENABLED", default=True)
+                        if use_llm_verifier
+                        else None
                     )
+                    verifier_cache_hit = False
+                    verifier_cache_key = None
+                    verification = None
+                    if (
+                        verifier_llm is not None
+                        and _env_flag("VERIFIER_CACHE_ENABLED", default=True)
+                    ):
+                        verifier_cache_key = pipeline_cache.key(
+                            "answer_verify",
+                            {
+                                "question": search_query,
+                                "answer_hash": stable_hash(answer),
+                                "evidence": _aggregated_fingerprint(aggregated),
+                                "coverage": _coverage_fingerprint(coverage),
+                                "router": _router_fingerprint(router_output),
+                                "external": _external_fingerprint(external_pack),
+                                "model": os.getenv("LLM_MODEL_ID", ""),
+                                "verifier_max_tokens": os.getenv("VERIFIER_MAX_TOKENS", "2200"),
+                                "thinking_mode": os.getenv("LLM_THINKING_MODE", ""),
+                            },
+                        )
+                        cached_verification = pipeline_cache.get(verifier_cache_key)
+                        if cached_verification is not None:
+                            verification = cached_verification
+                            verifier_cache_hit = True
+
+                    if verification is None:
+                        verification = verify_answer(
+                            question=search_query,
+                            answer=answer,
+                            evidence_pack=evidence_pack,
+                            coverage=coverage,
+                            router_output=router_output,
+                            external_pack=external_pack,
+                            llm_client=verifier_llm,
+                        )
+                        if (
+                            verifier_cache_key
+                            and getattr(verification, "status", "") != "error"
+                        ):
+                            pipeline_cache.set(verifier_cache_key, verification)
+
+                    cache_info["verifier_hit"] = verifier_cache_hit
+                    span.set_attribute("verification.llm_used", verifier_llm is not None)
+                    span.set_attribute("verification.cache_hit", verifier_cache_hit)
                     verification_status = verification.status
                     verification_issues = verification.issues
                     span.set_attribute("verification.status", verification_status)
@@ -869,25 +1239,17 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             "Tôi chưa thể trả lời phần cụ thể này một cách an toàn vì verifier phát hiện claim cần nguồn "
                             "hoặc claim vượt quá evidence hiện có. Có thể hỏi lại theo hướng tổng quát hơn hoặc bổ sung nguồn/guideline cụ thể."
                         )
+                verifier_ms = round((time.time() - verifier_t0) * 1000.0, 2)
+            timings_ms["verifier_ms"] = verifier_ms
 
-            # append assistant response
-            session_store.append(session_id, "assistant", answer)
-
-            # reload full history
-            history = session_store.get_history(session_id)
-
+            response_chunks = _ordered_chunks_for_response(chunks, aggregated)
             chunks_out = [
                 {"id": c.id, "text": c.text, "score": c.score, "metadata": c.metadata}
-                for c in chunks
-            ] if chunks else []
-
-            return ChatResponse(
-                session_id=session_id,
-                answer=answer,
-                history=history,
-                context_used=len(chunks),
-                retrieved_chunks=chunks_out,
-                metadata={
+                for c in response_chunks
+            ] if response_chunks else []
+            timings_ms["total_ms"] = round((time.time() - request_t0) * 1000.0, 2)
+            response_metadata = {
+                    "answer_mode": answer_mode,
                     "query_type": router_output.query_type,
                     "answer_policy": getattr(router_output, "answer_policy", "strict_rag"),
                     "answer_style": router_output.answer_style,
@@ -898,8 +1260,10 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     "external_search_status": getattr(external_pack, "status", "disabled"),
                     "verification_status": verification_status,
                     "verification_issues": verification_issues[:10],
-                },
-                external_sources=[
+                    "timings_ms": timings_ms,
+                    "cache": cache_info,
+                }
+            external_sources_out = [
                     {
                         "id": source.id,
                         "title": source.title,
@@ -908,7 +1272,32 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         "source_domain": source.source_domain,
                     }
                     for source in getattr(external_pack, "sources", [])
-                ],
+                ]
+
+            # Persist full assistant message so source panel/debug survive reloads.
+            session_store.append(
+                session_id,
+                "assistant",
+                answer,
+                context_used=len(chunks),
+                retrieved_chunks=chunks_out,
+                metadata=response_metadata,
+                external_sources=external_sources_out,
+                degraded_mode=degraded_mode,
+                degraded_reason=degraded_reason,
+            )
+
+            # reload full history
+            history = session_store.get_history(session_id)
+
+            return ChatResponse(
+                session_id=session_id,
+                answer=answer,
+                history=history,
+                context_used=len(chunks),
+                retrieved_chunks=chunks_out,
+                metadata=response_metadata,
+                external_sources=external_sources_out,
                 degraded_mode=degraded_mode,
                 degraded_reason=degraded_reason,
             )

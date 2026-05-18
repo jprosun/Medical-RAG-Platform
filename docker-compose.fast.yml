@@ -1,0 +1,16 @@
+services:
+  rag-orchestrator:
+    environment:
+      # Quality-preserving latency profile.
+      # Use with: docker compose -f docker-compose.local.yml -f docker-compose.fast.yml up --build
+      PIPELINE_CACHE_ENABLED: "true"
+      PIPELINE_CACHE_TTL_SECONDS: "86400"
+      LLM_HTTP_KEEPALIVE_ENABLED: "true"
+      LLM_CLIENT_CACHE_ENABLED: "true"
+      EVIDENCE_CACHE_ENABLED: "true"
+      VERIFIER_CACHE_ENABLED: "true"
+
+  streamlit-ui:
+    environment:
+      RAG_API_TIMEOUT_S: "180"
+      SHOW_TIMINGS: "true"

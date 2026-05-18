@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from typing import Optional
 
@@ -43,6 +44,7 @@ class KServeClient:
         timeout_s: int,
         retries: int,
         retry_backoff_s: int,
+        use_keepalive: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.completions_path = completions_path
@@ -51,6 +53,27 @@ class KServeClient:
         self.timeout_s = timeout_s
         self.retries = retries
         self.retry_backoff_s = retry_backoff_s
+        self.use_keepalive = use_keepalive
+        self._thread_local = threading.local()
+
+    def _post(self, url: str, payload: dict, headers: dict):
+        if not self.use_keepalive:
+            return requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout_s,
+            )
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=self.timeout_s,
+        )
 
     def _is_deepseek(self) -> bool:
         provider_hint = (os.getenv("LLM_PROVIDER_HINT") or "").strip().lower()
@@ -152,12 +175,7 @@ class KServeClient:
         for attempt in range(max_attempts):
             try:
                 start = time.time()
-                r = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout_s,
-                )
+                r = self._post(url, payload, headers)
                 latency = time.time() - start
                 LLM_INFERENCE_LATENCY_SECONDS.labels(model=self.model_id).observe(latency)
 
@@ -223,6 +241,10 @@ class KServeClient:
                 raise last_err
 
 
+_CLIENT_CACHE: dict[tuple, KServeClient] = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
+
+
 def build_kserve_client_from_env() -> Optional[KServeClient]:
     """
     Factory for inference client.
@@ -252,7 +274,26 @@ def build_kserve_client_from_env() -> Optional[KServeClient]:
 
     api_key = (os.getenv("LLM_API_KEY") or "").strip() or None
 
-    return KServeClient(
+    use_keepalive = os.getenv("LLM_HTTP_KEEPALIVE_ENABLED", "true").lower() == "true"
+    cache_enabled = os.getenv("LLM_CLIENT_CACHE_ENABLED", "true").lower() == "true"
+    cache_key = (
+        base_url,
+        completions_path,
+        model_id,
+        api_key,
+        int(os.getenv("LLM_TIMEOUT_S", "300")),
+        int(os.getenv("LLM_RETRIES", "3")),
+        int(os.getenv("LLM_RETRY_BACKOFF_S", "3")),
+        use_keepalive,
+    )
+
+    if cache_enabled:
+        with _CLIENT_CACHE_LOCK:
+            cached = _CLIENT_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+    client = KServeClient(
         base_url=base_url,
         completions_path=completions_path,
         model_id=model_id,
@@ -260,4 +301,9 @@ def build_kserve_client_from_env() -> Optional[KServeClient]:
         timeout_s=int(os.getenv("LLM_TIMEOUT_S", "300")),
         retries=int(os.getenv("LLM_RETRIES", "3")),
         retry_backoff_s=int(os.getenv("LLM_RETRY_BACKOFF_S", "3")),
+        use_keepalive=use_keepalive,
     )
+    if cache_enabled:
+        with _CLIENT_CACHE_LOCK:
+            _CLIENT_CACHE[cache_key] = client
+    return client

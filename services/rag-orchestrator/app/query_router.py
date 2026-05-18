@@ -115,6 +115,19 @@ _FACT_KW = {
     "dấu hiệu", "dau hieu", "triệu chứng", "trieu chung",
 }
 
+_SOURCE_DISCOVERY_KW = {
+    "tài liệu nào", "tai lieu nao",
+    "nguồn nào", "nguon nao",
+    "bài nào", "bai nao",
+    "bài viết nào", "bai viet nao",
+    "nghiên cứu nào", "nghien cuu nao",
+    "có những tài liệu", "co nhung tai lieu",
+    "các tài liệu", "cac tai lieu",
+    "liệt kê tài liệu", "liet ke tai lieu",
+    "danh sách tài liệu", "danh sach tai lieu",
+    "documents about", "papers about", "sources about",
+}
+
 _BOUNDED_PARTIAL_KW = {
     "co the ket luan", "có thể kết luận",
     "co the khang dinh", "có thể khẳng định",
@@ -275,6 +288,11 @@ def _has_professional_explainer_intent(text_lower: str) -> bool:
     return any(marker in padded or marker in padded_stripped for marker in markers)
 
 
+def _has_source_discovery_intent(text_lower: str) -> bool:
+    text_stripped = _strip_diacritics(text_lower)
+    return any(kw in text_lower or kw in text_stripped for kw in _SOURCE_DISCOVERY_KW)
+
+
 def _infer_answer_style(
     query_lower: str,
     best_type: str,
@@ -291,7 +309,7 @@ def _infer_answer_style(
         if direct_fact_question or _asks_for_numeric_value(query_lower):
             return "exact"
         return "summary" if single_document_question else "exact"
-    if best_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer", "professional_explainer"}:
+    if best_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer", "professional_explainer", "source_discovery"}:
         return "summary"
     return "summary"
 
@@ -328,6 +346,7 @@ _OPEN_ENRICHED_TOPIC_TYPES = {
     "guideline_comparison",
     "teaching_explainer",
     "professional_explainer",
+    "source_discovery",
 }
 
 
@@ -367,7 +386,10 @@ def route_query(query: str) -> RouterOutput:
     single_document_question = _looks_single_document_question(q)
     direct_fact_question = _has_direct_fact_question(q)
 
-    if (
+    if _has_source_discovery_intent(q):
+        best_type = "source_discovery"
+        best_score = 1
+    elif (
         not single_document_question
         and not _asks_for_numeric_value(q)
         and _has_professional_explainer_intent(q)
@@ -485,6 +507,16 @@ def route_query(query: str) -> RouterOutput:
             "needs_extractor": True,
             "retrieval_mode": "mechanistic_synthesis",
         },
+        "source_discovery": {
+            "depth": "medium",
+            "requires_numbers": False,
+            "requires_limitations": False,
+            "requires_comparison": False,
+            "answer_style": "summary",
+            "retrieval_profile": "deep",
+            "needs_extractor": False,
+            "retrieval_mode": "topic_summary",
+        },
     }
 
     config = dict(_TYPE_CONFIG[best_type])
@@ -499,7 +531,7 @@ def route_query(query: str) -> RouterOutput:
     if best_type == "comparative_synthesis" and single_document_question:
         config["retrieval_mode"] = "article_centric"
         config["retrieval_profile"] = "standard"
-    if answer_style in {"exact", "summary", "bounded_partial"} and best_type not in {"research_appraisal", "professional_explainer"}:
+    if answer_style in {"exact", "summary", "bounded_partial"} and best_type not in {"research_appraisal", "professional_explainer", "source_discovery"}:
         config["needs_extractor"] = False
     if answer_style == "exact" and not _asks_for_numeric_value(q):
         config["requires_numbers"] = False
@@ -507,7 +539,10 @@ def route_query(query: str) -> RouterOutput:
         config["retrieval_mode"] = "article_centric"
 
     if answer_policy == "open_enriched":
-        if best_type in {"teaching_explainer", "professional_explainer"}:
+        if best_type == "source_discovery":
+            config["retrieval_mode"] = "topic_summary"
+            config["retrieval_profile"] = "deep"
+        elif best_type in {"teaching_explainer", "professional_explainer"}:
             config["retrieval_mode"] = "mechanistic_synthesis"
         else:
             config["retrieval_mode"] = "topic_summary"

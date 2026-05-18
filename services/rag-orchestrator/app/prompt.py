@@ -443,7 +443,15 @@ def _should_include_secondary_sources(router_output: RouterOutput) -> bool:
     retrieval_mode = getattr(router_output, "retrieval_mode", "")
     if retrieval_mode == "article_centric":
         return False
-    return router_output.query_type in {"comparative_synthesis", "guideline_comparison", "teaching_explainer", "professional_explainer"}
+    if getattr(router_output, "answer_mode", "") == "thinking":
+        return True
+    return router_output.query_type in {
+        "comparative_synthesis",
+        "guideline_comparison",
+        "teaching_explainer",
+        "professional_explainer",
+        "source_discovery",
+    }
 
 
 def _select_template(router_output: RouterOutput) -> str:

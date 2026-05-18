@@ -17,6 +17,12 @@ class FakeRedis:
         # ignore TTL for unit test; just store the value
         self.store[key] = value
 
+    def keys(self, pattern):
+        return list(self.store.keys())
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
 def test_session_store_memory_fallback(monkeypatch):
     monkeypatch.delenv("REDIS_HOST", raising=False)
 
@@ -84,3 +90,42 @@ def test_module_level_append_and_get_messages(monkeypatch):
     assert msgs[0]["content"] == "hello"
     assert msgs[1]["role"] == "assistant"
     assert msgs[1]["content"] == "hi"
+
+
+def test_get_all_sessions_ignores_pipeline_cache_keys(monkeypatch):
+    fake = FakeRedis()
+    fake.store = {
+        "session-a": json.dumps([{"role": "user", "content": "hello"}]),
+        "title:session-a": "Session A",
+        "rag:pipeline:v1:evidence_extract:abc": "cached",
+        "session:legacy": json.dumps({"messages": []}),
+    }
+    monkeypatch.setenv("REDIS_URL", "redis://test")
+    monkeypatch.setattr(session.redis, "from_url", lambda *_args, **_kwargs: fake)
+
+    store = SessionStore()
+    sessions = store.get_all_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == "session-a"
+    assert sessions[0]["title"] == "Session A"
+    assert "updated_at" in sessions[0]
+
+
+def test_session_store_persists_assistant_metadata(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    store = SessionStore()
+    store.append(
+        "s1",
+        "assistant",
+        "answer",
+        metadata={"answer_mode": "thinking"},
+        retrieved_chunks=[{"id": "c1", "text": "evidence", "metadata": {}}],
+        context_used=1,
+    )
+
+    history = store.get_history("s1")
+    assert history[0]["metadata"]["answer_mode"] == "thinking"
+    assert history[0]["retrieved_chunks"][0]["id"] == "c1"
+    assert history[0]["context_used"] == 1
+    assert "created_at" in history[0]

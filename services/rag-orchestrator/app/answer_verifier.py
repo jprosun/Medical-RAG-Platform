@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -148,9 +149,9 @@ def verify_answer(
                 {"role": "system", "content": "Bạn là verifier RAG y khoa. Trả về JSON hợp lệ, không markdown."},
                 {"role": "user", "content": json.dumps(verifier_prompt, ensure_ascii=False)},
             ],
-            max_tokens=2200,
+            max_tokens=int(os.getenv("VERIFIER_MAX_TOKENS", "2200")),
             temperature=0.0,
-            attempt_budget=1,
+            attempt_budget=int(os.getenv("VERIFIER_MAX_ATTEMPTS", "1")),
         )
         start = raw.find("{")
         end = raw.rfind("}")

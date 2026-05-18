@@ -1,7 +1,8 @@
 import json
 import os
+import time
 import redis
-from typing import List, Dict
+from typing import List, Dict, Any
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 SESSION_TTL_S = int(os.getenv("SESSION_TTL_S", "0"))
@@ -50,22 +51,48 @@ class SessionStore:
             return json.loads(data) if data else []
         return self._memory_store.get(session_id, [])
 
-    def get_all_sessions(self) -> List[Dict[str, str]]:
+    def _session_updated_at(self, session_id: str, history: List[Dict] | None = None) -> float:
+        if self.redis_enabled:
+            raw = self._client.get(f"updated_at:{session_id}")
+            if raw:
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    pass
+        history = history if history is not None else self.get_history(session_id)
+        for message in reversed(history or []):
+            raw = message.get("created_at")
+            if raw:
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    def get_all_sessions(self) -> List[Dict[str, Any]]:
         if self.redis_enabled:
             all_keys = self._client.keys("*")
-            session_ids = [k for k in all_keys if not k.startswith("title:")]
+            cache_prefix = os.getenv("PIPELINE_CACHE_PREFIX", "rag:pipeline")
+            ignored_prefixes = ("title:", "updated_at:", f"{cache_prefix}:", "session:")
+            session_ids = [
+                k for k in all_keys
+                if not any(k.startswith(prefix) for prefix in ignored_prefixes)
+            ]
             
             result = []
             for sid in session_ids:
                 # To prevent errors if the session key is something else, double check
                 title = self._client.get(f"title:{sid}") or "Cuộc trò chuyện"
-                result.append({"id": sid, "title": title})
+                updated_at = self._session_updated_at(sid)
+                result.append({"id": sid, "title": title, "updated_at": updated_at})
+            result.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
             return result
             
         result = []
-        for sid in self._memory_store.keys():
+        for sid, history in self._memory_store.items():
             title = self._memory_titles.get(sid, "Cuộc trò chuyện")
-            result.append({"id": sid, "title": title})
+            result.append({"id": sid, "title": title, "updated_at": self._session_updated_at(sid, history)})
+        result.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
         return result
 
     def get_title(self, session_id: str) -> str:
@@ -80,9 +107,12 @@ class SessionStore:
         else:
             self._memory_titles[session_id] = title
 
-    def append(self, session_id: str, role: str, content: str):
+    def append(self, session_id: str, role: str, content: str, **extra: Any):
         history = self.get_history(session_id)
-        history.append({"role": role, "content": content})
+        now = time.time()
+        message = {"role": role, "content": content, "created_at": now}
+        message.update({key: value for key, value in extra.items() if value is not None})
+        history.append(message)
 
         if self.redis_enabled:
             self._client.setex(
@@ -90,6 +120,7 @@ class SessionStore:
                 self.ttl,
                 json.dumps(history),
             )
+            self._client.setex(f"updated_at:{session_id}", self.ttl, str(now))
         else:
             self._memory_store[session_id] = history
 
@@ -98,6 +129,7 @@ class SessionStore:
         if self.redis_enabled:
             self._client.delete(session_id)
             self._client.delete(f"title:{session_id}")
+            self._client.delete(f"updated_at:{session_id}")
         else:
             self._memory_store.pop(session_id, None)
             self._memory_titles.pop(session_id, None)

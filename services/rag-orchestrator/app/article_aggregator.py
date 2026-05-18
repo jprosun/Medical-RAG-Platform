@@ -614,7 +614,9 @@ def _is_secondary_candidate(
             return False
 
     mode = getattr(router_output, "retrieval_mode", "article_centric") if router_output else "article_centric"
-    min_overlap = 1 if mode == "mechanistic_synthesis" else 2
+    query_type = getattr(router_output, "query_type", "") if router_output else ""
+    answer_mode = getattr(router_output, "answer_mode", "") if router_output else ""
+    min_overlap = 1 if mode == "mechanistic_synthesis" or query_type == "source_discovery" or answer_mode == "thinking" else 2
     return specific_overlap >= min_overlap
 
 
@@ -634,6 +636,10 @@ def _adds_distinct_support(
 ) -> bool:
     """Only keep secondary articles that add query-relevant support beyond primary."""
     if not _requires_distinct_secondary_support(router_output):
+        return True
+    if getattr(router_output, "query_type", "") == "source_discovery":
+        return True
+    if getattr(router_output, "answer_mode", "") == "thinking" and article.support_term_count > 0:
         return True
 
     primary_terms = _query_support_terms(primary, query)
@@ -732,7 +738,19 @@ def aggregate_articles(
     """
     if router_output:
         mode = getattr(router_output, "retrieval_mode", "article_centric")
-        if mode == "mechanistic_synthesis":
+        query_type = getattr(router_output, "query_type", "")
+        answer_mode = getattr(router_output, "answer_mode", "standard")
+        if query_type == "source_discovery":
+            max_secondary = 8 if answer_mode == "thinking" else 4
+            score_threshold = 0.55 if answer_mode == "thinking" else 0.65
+            max_primary_chunks = 2
+            max_sec_chunks = 2 if answer_mode == "thinking" else 1
+        elif answer_mode == "thinking" and mode != "article_centric":
+            max_secondary = 6
+            score_threshold = 0.60
+            max_primary_chunks = 3
+            max_sec_chunks = 2
+        elif mode == "mechanistic_synthesis":
             max_secondary = 5
             score_threshold = 0.70
             max_primary_chunks = 2

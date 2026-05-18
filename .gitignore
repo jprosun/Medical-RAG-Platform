@@ -7,6 +7,9 @@ temp_files/
 .vscode/
 .idea/
 *.log
+node_modules/
+dist/
+*.tsbuildinfo
 
 # Helm build artifacts
 charts/model-serving/charts/*.tgz

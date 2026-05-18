@@ -63,6 +63,12 @@ services:
       - "8000:8000"
     volumes:
       - ./rag-data:/rag-data:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
     depends_on:
       - qdrant
       - redis
@@ -78,7 +84,27 @@ services:
     ports:
       - "8501:8501"
     depends_on:
-      - rag-orchestrator
+      rag-orchestrator:
+        condition: service_healthy
+
+  web-ui:
+    build:
+      context: .
+      dockerfile: services/web-ui/Dockerfile
+    environment:
+      VITE_RAG_API_URL: /api
+      VITE_RAG_API_PROXY_TARGET: http://rag-orchestrator:8000
+      VITE_RAG_HEALTH_URL: http://localhost:8000
+      CHOKIDAR_USEPOLLING: "true"
+      OTEL_SDK_DISABLED: "true"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./services/web-ui:/app
+      - web_ui_node_modules:/app/node_modules
+    depends_on:
+      rag-orchestrator:
+        condition: service_healthy
 
   qdrant-ingestor:
     build:
@@ -133,3 +159,4 @@ services:
 volumes:
   qdrant_storage:
   ollama_data:
+  web_ui_node_modules:

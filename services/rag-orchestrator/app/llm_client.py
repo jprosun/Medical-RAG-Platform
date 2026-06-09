@@ -241,6 +241,99 @@ class KServeClient:
                 raise last_err
 
 
+    def generate_stream(
+        self,
+        prompt_or_messages: str | list,
+        max_tokens: int = 512,
+        temperature: float = 0.2,
+    ):
+        """
+        Stream answer text token-by-token using OpenAI Chat Completions SSE.
+
+        Yields incremental content deltas (str). Raises on transient/rate-limit
+        errors so the caller can fall back to a degraded answer. This is a single
+        streaming attempt (no mid-stream retry) on purpose: once bytes have been
+        sent to the client, retrying would duplicate partial output.
+        """
+        url = f"{self.base_url}{self.completions_path}"
+        messages = (
+            prompt_or_messages
+            if isinstance(prompt_or_messages, list)
+            else [{"role": "user", "content": prompt_or_messages}]
+        )
+        payload = self._build_payload(messages, max_tokens, temperature)
+        payload["stream"] = True
+
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        referer = (os.getenv("LLM_HTTP_REFERER") or "").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        app_name = (os.getenv("LLM_APP_NAME") or "").strip()
+        if app_name:
+            headers["X-Title"] = app_name
+
+        if self.use_keepalive:
+            session = getattr(self._thread_local, "session", None)
+            if session is None:
+                session = requests.Session()
+                self._thread_local.session = session
+            poster = session.post
+        else:
+            poster = requests.post
+
+        start = time.time()
+        emitted = False
+        try:
+            with poster(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout_s,
+                stream=True,
+            ) as r:
+                if r.status_code == 429:
+                    retry_after = r.headers.get("Retry-After", "")
+                    wait_s = float(retry_after) if retry_after.replace(".", "").isdigit() else 10.0
+                    raise UpstreamRateLimitError(
+                        "Rate limit exceeded during streaming", wait_s=wait_s
+                    )
+                if r.status_code in (503, 504):
+                    raise RuntimeError(f"Upstream transient error {r.status_code}")
+                r.raise_for_status()
+
+                for raw_line in r.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except (ValueError, TypeError):
+                        continue
+                    choices = obj.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content")
+                    if isinstance(piece, str) and piece:
+                        emitted = True
+                        yield piece
+            LLM_REQUESTS_TOTAL.labels(
+                model=self.model_id,
+                status="success" if emitted else "error",
+            ).inc()
+        finally:
+            LLM_INFERENCE_LATENCY_SECONDS.labels(model=self.model_id).observe(
+                time.time() - start
+            )
+
+
 _CLIENT_CACHE: dict[tuple, KServeClient] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
 

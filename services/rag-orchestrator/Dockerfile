@@ -21,11 +21,16 @@ COPY services/utils ./utils
 COPY services/rag-orchestrator/app ./app
 COPY services/rag-orchestrator/guardrails ./guardrails
 
-# Make sure Python can import "/app/utils"
-ENV PYTHONPATH=/app
+# Make sure Python can import "/app/utils" and model caches are writable by
+# the non-root runtime user.
+ENV PYTHONPATH=/app \
+    HF_HOME=/home/appuser/.cache/huggingface \
+    HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub \
+    SENTENCE_TRANSFORMERS_HOME=/home/appuser/.cache/sentence-transformers
 
 RUN useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p "$HF_HOME" "$HF_HUB_CACHE" "$SENTENCE_TRANSFORMERS_HOME" \
+    && chown -R appuser:appuser /app /home/appuser/.cache
 USER 10001
 
 EXPOSE 8000

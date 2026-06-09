@@ -314,6 +314,52 @@ def _chunk_query_bonus(query: str, payload: Dict[str, Any], retrieval_mode: str)
     return round(bonus, 4)
 
 
+def _extract_specific_entities(query: str) -> list[str]:
+    """Extract specific compound medical entity phrases for entity-level reranking.
+
+    Detects Vietnamese patterns like "ung thư hắc tố" (melanoma), "bệnh lao phổi" (TB)
+    and English patterns like "melanoma cancer", "Parkinson disease" to apply a
+    specificity penalty to chunks that match the generic category but not the specific entity.
+    """
+    norm = _normalize_for_matching(query)
+    tokens = norm.split()
+    n = len(tokens)
+    entities: list[str] = []
+
+    def _is_entity_token(tok: str) -> bool:
+        return len(tok) >= 3 and tok not in _RETRIEVAL_STOPWORDS
+
+    for prefix in ("ung thu", "hoi chung", "roi loan"):
+        p = prefix.split()
+        plen = len(p)
+        for i in range(n - plen):
+            if tokens[i:i + plen] == p:
+                rest = [t for t in tokens[i + plen:i + plen + 2] if _is_entity_token(t)]
+                if rest:
+                    entities.append(" ".join(p + rest))
+
+    for prefix in ("benh", "viem", "suy", "nhiem", "xo"):
+        for i, tok in enumerate(tokens):
+            if tok == prefix and i + 1 < n and _is_entity_token(tokens[i + 1]):
+                parts = [prefix, tokens[i + 1]]
+                if i + 2 < n and _is_entity_token(tokens[i + 2]):
+                    parts.append(tokens[i + 2])
+                entities.append(" ".join(parts))
+
+    en_suffixes = {"cancer", "carcinoma", "lymphoma", "leukemia", "disease", "syndrome", "disorder", "infection"}
+    for i, tok in enumerate(tokens):
+        if tok in en_suffixes and i > 0 and _is_entity_token(tokens[i - 1]):
+            entities.append(f"{tokens[i - 1]} {tok}")
+
+    seen: set[str] = set()
+    result = []
+    for ent in entities:
+        if ent not in seen:
+            seen.add(ent)
+            result.append(ent)
+    return result[:4]
+
+
 def _chunk_content_bonus(query: str, text: str, payload: Dict[str, Any], retrieval_mode: str) -> float:
     query_terms = _query_keywords(query)
     query_acronyms = _query_acronyms(query)
@@ -352,6 +398,18 @@ def _chunk_content_bonus(query: str, text: str, payload: Dict[str, Any], retriev
                 bonus += 0.04 * coverage
         else:
             bonus -= 0.06
+
+    specific_entities = _extract_specific_entities(query)
+    if specific_entities:
+        entity_hits = sum(
+            1 for ent in specific_entities
+            if ent in text_norm or ent in metadata_norm
+        )
+        hit_rate = entity_hits / len(specific_entities)
+        if entity_hits == 0:
+            bonus -= 0.20
+        elif hit_rate < 0.5:
+            bonus -= 0.08
 
     return round(bonus, 4)
 

@@ -111,6 +111,39 @@ def test_get_all_sessions_ignores_pipeline_cache_keys(monkeypatch):
     assert "updated_at" in sessions[0]
 
 
+def test_get_all_sessions_ignores_topic_and_non_json_keys(monkeypatch):
+    fake = FakeRedis()
+    fake.store = {
+        "session-a": json.dumps([{"role": "user", "content": "hello", "created_at": 10.0}]),
+        "title:session-a": "Session A",
+        # The bug: topic keys and stray non-JSON values used to be treated as
+        # sessions and crashed get_all_sessions with a JSONDecodeError (500).
+        "topic:session-a": "ung thư",
+        "updated_at:session-a": "10.0",
+        "rag:pipeline:v1:retrieval:xyz": "cached-blob",
+        "session:legacy": json.dumps({"messages": []}),
+        "stray-non-json-key": "not json at all",
+    }
+    monkeypatch.setenv("REDIS_URL", "redis://test")
+    monkeypatch.setattr(session.redis, "from_url", lambda *_args, **_kwargs: fake)
+
+    store = SessionStore()
+    sessions = store.get_all_sessions()  # must not raise
+
+    assert [s["id"] for s in sessions] == ["session-a"]
+    assert sessions[0]["title"] == "Session A"
+
+
+def test_get_history_survives_corrupt_payload(monkeypatch):
+    fake = FakeRedis()
+    fake.store = {"s1": "not-json"}
+    monkeypatch.setenv("REDIS_URL", "redis://test")
+    monkeypatch.setattr(session.redis, "from_url", lambda *_args, **_kwargs: fake)
+
+    store = SessionStore()
+    assert store.get_history("s1") == []
+
+
 def test_session_store_persists_assistant_metadata(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
 

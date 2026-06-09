@@ -7,10 +7,13 @@ services:
       PIPELINE_CACHE_TTL_SECONDS: "86400"
       LLM_HTTP_KEEPALIVE_ENABLED: "true"
       LLM_CLIENT_CACHE_ENABLED: "true"
+      RETRIEVAL_CACHE_ENABLED: "true"
       EVIDENCE_CACHE_ENABLED: "true"
       VERIFIER_CACHE_ENABLED: "true"
+      # Skip the second hybrid entity-fallback retrieval for general Standard
+      # queries (warm-path bottleneck). Set "false" to A/B the quality impact.
+      ENTITY_FALLBACK_GUARD_ENABLED: "true"
 
-  streamlit-ui:
+  web-ui:
     environment:
-      RAG_API_TIMEOUT_S: "180"
-      SHOW_TIMINGS: "true"
+      VITE_RAG_API_URL: /api

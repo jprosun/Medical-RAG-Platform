@@ -30,37 +30,78 @@ Rules:
 6. Return ONLY the rewritten query, nothing else."""
 
 
+# Patterns that make a question self-contained (it carries its own subject),
+# so it must NOT inherit the previous turn's topic.
+_SELF_CONTAINED_PATTERNS = (
+    "là gì", "la gi", "là bệnh gì", "la benh gi", "là loại", "nghĩa là", "nghia la",
+    "thế nào là", "the nao la", "định nghĩa", "dinh nghia",
+    "what is", "what are", "define ",
+)
+
+# Disease / condition subject terms. If the message names one of these, it has
+# its own topic and is a (possibly short) standalone question, not a follow-up
+# fragment that depends on the previous turn.
+_TOPIC_SUBJECT_TERMS = (
+    "ung thư", "ung thu", "viêm", "viem", "hội chứng", "hoi chung",
+    "rối loạn", "roi loan", "đái tháo đường", "dai thao duong", "tiểu đường", "tieu duong",
+    "tăng huyết áp", "tang huyet ap", "hen phế quản", "hen suyễn", "hen suyen",
+    "trầm cảm", "tram cam", "đột quỵ", "dot quy", "nhồi máu", "nhoi mau",
+    "xơ gan", "xo gan", "suy thận", "suy than", "suy tim", "lao phổi", "lao phoi",
+    "sốt xuất huyết", "sot xuat huyet", "viêm gan", "viem gan", "đột biến gen",
+)
+
+_REFERENT_WORDS = {
+    "it", "this", "that", "those", "they", "them",
+    "its", "their", "what about", "how about",
+    "and", "also", "too", "else", "more",
+    "the same", "similar",
+}
+
+
+def _is_self_contained(msg: str) -> bool:
+    """A definition question or one naming its own disease subject is standalone."""
+    if any(pattern in msg for pattern in _SELF_CONTAINED_PATTERNS):
+        return True
+    return any(term in msg for term in _TOPIC_SUBJECT_TERMS)
+
+
 def _needs_rewriting(message: str, history: list) -> bool:
     """
     Heuristic: does this message need rewriting?
-    Short follow-ups and pronoun-heavy messages need it.
+    Short follow-ups and pronoun-heavy messages need it — but a self-contained
+    question (its own subject or a "X là gì" pattern) must be left alone, or it
+    inherits the previous turn's topic (e.g. "ung thư máu là gì" after a
+    cervical-cancer turn would get rewritten/anchored to cervical cancer).
     """
     if not history:
         return False
 
     msg = message.strip().lower()
-    # Very short messages are likely follow-ups
-    if len(msg.split()) <= 5:
+    # Explicit referents always need resolving against context.
+    if any(r in msg for r in _REFERENT_WORDS):
         return True
-    # Contains pronouns/referents without full context
-    referent_words = {"it", "this", "that", "those", "they", "them",
-                      "its", "their", "what about", "how about",
-                      "and", "also", "too", "else", "more",
-                      "the same", "similar"}
-    return any(r in msg for r in referent_words)
+    # Self-contained questions carry their own topic: never rewrite them.
+    if _is_self_contained(msg):
+        return False
+    # Otherwise, very short messages are likely context-dependent fragments.
+    return len(msg.split()) <= 5
 
 
 def build_rewrite_prompt(message: str, history: list) -> List[Dict[str, str]]:
     """Build the prompt for the LLM to rewrite the query."""
     messages = [{"role": "system", "content": REWRITE_SYSTEM}]
 
-    # Include last 2 turns for context
+    # Include last 2 turns for context; truncate long assistant replies
     recent = history[-4:] if history else []  # last 2 pairs (user+assistant)
     if recent:
-        context = "\n".join(
-            f"{m.get('role', 'user').upper()}: {m.get('content', '')}"
-            for m in recent
-        )
+        context_lines = []
+        for m in recent:
+            role = m.get("role", "user").upper()
+            content = m.get("content", "")
+            if role == "ASSISTANT" and len(content) > 300:
+                content = content[:300] + "…"
+            context_lines.append(f"{role}: {content}")
+        context = "\n".join(context_lines)
         messages.append({
             "role": "user",
             "content": f"Conversation context:\n{context}\n\nFollow-up message to rewrite:\n{message}",

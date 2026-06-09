@@ -1,11 +1,13 @@
 from uuid import uuid4
+import json
 import time
 import os
 import re
+from typing import Any
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -16,7 +18,7 @@ from opentelemetry import trace
 from .session import SessionStore
 from .health import readiness, liveness
 from utils.logging import log_request
-from .retriever import build_retriever_from_env
+from .retriever import build_retriever_from_env, _extract_specific_entities, _normalize_for_matching
 from .prompt import build_prompt, build_prompt_v2
 from .llm_client import build_kserve_client_from_env, UpstreamRateLimitError
 from .schemas import ChatRequest, ChatResponse
@@ -30,6 +32,7 @@ from .coverage_scorer import score_coverage
 from .answer_planner import build_answer_plan, format_answer_plan_for_prompt, should_plan_answer
 from .answer_verifier import verify_answer
 from .pipeline_cache import pipeline_cache, stable_hash
+from .pipeline_flags import should_skip_entity_fallback
 from .external_source_resolver import (
     ExternalEvidencePack,
     format_external_sources_for_prompt,
@@ -127,9 +130,9 @@ def _apply_answer_mode(router_output, answer_mode: str) -> None:
         router_output.retrieval_profile = "standard"
 
 
-def _answer_mode_instruction(answer_mode: str) -> str:
+def _answer_mode_instruction(answer_mode: str, coverage=None) -> str:
     if answer_mode == "thinking":
-        return (
+        base = (
             "UI_ANSWER_MODE: thinking\n"
             "- Trả lời thật chi tiết và có chiều sâu học thuật; ưu tiên 1100-1700 từ khi câu hỏi phù hợp.\n"
             "- Khai thác tối đa evidence RAG đã truy hồi: dùng nhiều nguồn/chunk liên quan hơn, gắn citation [n] sát từng claim được evidence hỗ trợ.\n"
@@ -138,15 +141,55 @@ def _answer_mode_instruction(answer_mode: str) -> str:
             "- Với số liệu, guideline, liều thuốc, phác đồ hoặc khuyến nghị cá thể hóa: chỉ nêu khi có RAG/external source rõ; nếu không có nguồn thì chuyển về mô tả tổng quát hoặc bỏ claim.\n"
             "- Giữ kết luận ngắn ở cuối cùng."
         )
-    return (
-        "UI_ANSWER_MODE: standard\n"
-        "- Trả lời đầy đủ ý, rõ ràng cho người dùng có chuyên môn; ưu tiên 500-850 từ khi câu hỏi là lý thuyết/giải thích.\n"
-        "- Evidence RAG là nền chính: mọi claim dùng tài liệu truy hồi phải gắn citation [n] sát claim; không gắn citation cho phần kiến thức nền không có trong evidence.\n"
-        "- Có thể bổ sung kiến thức nền an toàn để làm câu trả lời dễ hiểu hơn, nhưng không tự bịa số liệu, guideline mới, liều thuốc, phác đồ hoặc lời khuyên cá thể hóa.\n"
-        "- Tránh các đoạn phủ định dài kiểu 'tài liệu không đề cập'; nếu evidence yếu, nói ngắn gọn giới hạn rồi vẫn giải thích nền an toàn.\n"
-        "- Không viết quá dài như Thinking; ưu tiên câu trả lời nhanh, có cấu trúc và đủ ý chính.\n"
-        "- Giữ kết luận ngắn ở cuối cùng."
-    )
+    else:
+        base = (
+            "UI_ANSWER_MODE: standard\n"
+            "- Trả lời đầy đủ ý, rõ ràng cho người dùng có chuyên môn; ưu tiên 500-850 từ khi câu hỏi là lý thuyết/giải thích.\n"
+            "- Evidence RAG là nền chính: mọi claim dùng tài liệu truy hồi phải gắn citation [n] sát claim; không gắn citation cho phần kiến thức nền không có trong evidence.\n"
+            "- Có thể bổ sung kiến thức nền an toàn để làm câu trả lời dễ hiểu hơn, nhưng không tự bịa số liệu, guideline mới, liều thuốc, phác đồ hoặc lời khuyên cá thể hóa.\n"
+            "- Tránh các đoạn phủ định dài kiểu 'tài liệu không đề cập'; nếu evidence yếu, nói ngắn gọn giới hạn rồi vẫn giải thích nền an toàn.\n"
+            "- Không viết quá dài như Thinking; ưu tiên câu trả lời nhanh, có cấu trúc và đủ ý chính.\n"
+            "- Giữ kết luận ngắn ở cuối cùng."
+        )
+
+    if coverage is None:
+        return base
+
+    coverage_mode = getattr(coverage, "coverage_mode", "")
+    coverage_level = getattr(coverage, "coverage_level", "")
+
+    if coverage_mode == "evidence_strong":
+        enrichment = (
+            "ENRICHMENT_GUIDANCE: Evidence RAG mạnh và đầy đủ.\n"
+            "- Ưu tiên tổng hợp và trình bày từ evidence đã truy hồi là chính; đây là nguồn thông tin chủ đạo.\n"
+            "- Có thể enrich kiến thức nền ngắn gọn để giải thích cơ chế hoặc bối cảnh khi cần thiết.\n"
+            "- Không cần nêu giới hạn evidence vì dữ liệu đã đủ để trả lời đầy đủ."
+        )
+    elif coverage_mode == "title_anchored":
+        enrichment = (
+            "ENRICHMENT_GUIDANCE: Evidence RAG bao phủ được một phần câu hỏi.\n"
+            "- Tổng hợp từ evidence trước; sau đó bổ sung kiến thức nền y khoa để hoàn thiện câu trả lời.\n"
+            "- Phần kiến thức nền không có trong evidence không được gắn citation; phân biệt rõ.\n"
+            "- Đảm bảo câu trả lời đầy đủ và có chiều sâu dù evidence chỉ bao phủ một phần."
+        )
+    elif coverage_mode == "retrieval_failed":
+        enrichment = (
+            "ENRICHMENT_GUIDANCE: Không tìm được evidence RAG đáng tin cậy cho câu hỏi này.\n"
+            "- Trả lời hoàn toàn từ kiến thức nền y khoa; không bịa citation hoặc số liệu không có nguồn.\n"
+            "- Đảm bảo câu trả lời đầy đủ, chính xác theo độ dài yêu cầu của mode.\n"
+            "- Nếu cần, nêu một lần ngắn gọn rằng không tìm được tài liệu cụ thể, rồi vẫn trả lời đầy đủ từ kiến thức nền."
+        )
+    elif coverage_mode == "open_knowledge" or coverage_level == "low":
+        enrichment = (
+            "ENRICHMENT_GUIDANCE: Evidence RAG hạn chế hoặc thiếu nhiều phần.\n"
+            "- Bổ sung kiến thức nền y khoa đầy đủ để đảm bảo câu trả lời hoàn chỉnh và hữu ích.\n"
+            "- Citation chỉ dùng cho claim thực sự có trong evidence; phần kiến thức nền không gắn citation giả.\n"
+            "- Không viết dài về giới hạn evidence; nếu cần, nêu ngắn gọn một lần rồi vẫn trả lời đầy đủ."
+        )
+    else:
+        return base
+
+    return f"{base}\n\n{enrichment}"
 
 
 def _source_discovery_instruction() -> str:
@@ -794,8 +837,23 @@ def delete_session(session_id: str):
 # ---------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
+def _chat_core(
+    req: ChatRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    *,
+    stream: bool = False,
+):
+    """Core chat pipeline, shared by /api/chat and /api/chat/stream.
+
+    Runs as a generator that yields tuples:
+      ("stage", {...})  progress events for the UI (cheap, both transports)
+      ("token", {...})  answer deltas, only when ``stream=True``
+      ("final", {...})  the full ChatResponse payload, exactly once at the end
+
+    The non-streaming endpoint drains this generator and returns the final
+    payload, so /api/chat behaviour is identical to before streaming existed.
+    """
     RAG_CHAT_REQUESTS_TOTAL.inc()
     RAG_INFLIGHT.inc()
     try:
@@ -803,9 +861,40 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
         with tracer.start_as_current_span("rag.chat") as root_span:
             request_t0 = time.time()
             timings_ms: dict[str, float] = {}
-            cache_info: dict[str, bool] = {}
             session_id = req.session_id or str(uuid4())
             answer_mode = _normalize_answer_mode(req.answer_mode)
+            cache_info: dict[str, bool] = {
+                "retrieval_hit": False,
+                "evidence_extract_hit": False,
+                "verifier_hit": False,
+            }
+            pipeline_info: dict[str, Any] = {
+                "fast_path_enabled": answer_mode == "standard",
+                "rewrite_enabled": _env_flag("LLM_REWRITER_ENABLED", default=True),
+                "query_rewritten": False,
+                "pipeline_cache_enabled": bool(getattr(pipeline_cache, "enabled", False)),
+                "retrieval_cache_enabled": (
+                    _env_flag("RETRIEVAL_CACHE_ENABLED", default=False)
+                    and bool(getattr(pipeline_cache, "enabled", False))
+                ),
+                "retrieval_hit": False,
+                "retrieval_profile": "",
+                "retrieval_mode": "",
+                "retrieval_top_k": 0,
+                "entity_fallback_used": False,
+                "entity_fallback_added": 0,
+                "entity_fallback_skipped": False,
+                "entity_fallback_cache_hit": False,
+                "router_needs_extractor": False,
+                "llm_extractor_enabled": _env_flag("LLM_EXTRACTOR_ENABLED", default=False),
+                "llm_extractor_used": False,
+                "answer_planner_llm_used": False,
+                "external_resolver_used": False,
+                "llm_verifier_enabled": _env_flag("LLM_VERIFIER_ENABLED", default=True),
+                "llm_verifier_requested": False,
+                "llm_verifier_used": False,
+                "deterministic_verifier_run": False,
+            }
             request.state.session_id = session_id
             root_span.set_attribute("session.id", session_id)
             root_span.set_attribute("ui.answer_mode", answer_mode)
@@ -829,17 +918,32 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             # query rewriting for multi-turn conversations
             rewrite_t0 = time.time()
             with tracer.start_as_current_span("query.rewrite") as span:
-                kserve_for_rewrite = _build_optional_llm_client(
-                    "LLM_REWRITER_ENABLED",
-                    default=True,
+                rewrite_enabled = bool(pipeline_info["rewrite_enabled"])
+                kserve_for_rewrite = (
+                    _build_optional_llm_client("LLM_REWRITER_ENABLED", default=True)
+                    if rewrite_enabled and history
+                    else None
                 )
                 search_query = rewrite_query(
                     req.message, history, llm_client=kserve_for_rewrite
                 )
+                query_rewritten = search_query != req.message
+                pipeline_info["query_rewritten"] = query_rewritten
                 span.set_attribute("query.original", req.message)
                 span.set_attribute("query.rewritten", search_query)
-                span.set_attribute("query.was_rewritten", search_query != req.message)
+                span.set_attribute("query.was_rewritten", query_rewritten)
             timings_ms["query_rewrite_ms"] = round((time.time() - rewrite_t0) * 1000.0, 2)
+
+            # ── Session topic memory (entity-level context for follow-ups) ──
+            query_entities = _extract_specific_entities(search_query)
+            if query_entities:
+                # First turn or query has its own entities: update stored topic
+                session_store.set_topic(session_id, " ".join(query_entities[:2]))
+            elif history:
+                # Follow-up with no detected entity: inject stored topic into query
+                stored_topic = session_store.get_topic(session_id)
+                if stored_topic and stored_topic.lower() not in search_query.lower():
+                    search_query = f"{search_query} {stored_topic}"
 
             # ── 1. Query Router (rule-based, no LLM) ──────────────
             with tracer.start_as_current_span("query.route") as span:
@@ -850,6 +954,9 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("router.needs_extractor", router_output.needs_extractor)
                 span.set_attribute("router.retrieval_profile", router_output.retrieval_profile)
                 span.set_attribute("router.answer_mode", answer_mode)
+                pipeline_info["router_needs_extractor"] = bool(router_output.needs_extractor)
+                pipeline_info["retrieval_profile"] = router_output.retrieval_profile
+                pipeline_info["retrieval_mode"] = router_output.retrieval_mode
 
             # ── 2. Retrieve with profile-based top_k ─────────────
             _PROFILE_TOP_K = {"light": 8, "standard": 12, "deep": 20}
@@ -861,6 +968,10 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     profile_top_k = max(profile_top_k, int(os.getenv("RAG_SOURCE_DISCOVERY_STANDARD_TOP_K", "18")))
             elif answer_mode == "thinking":
                 profile_top_k = max(profile_top_k, int(os.getenv("RAG_THINKING_TOP_K", "32")))
+            pipeline_info["retrieval_top_k"] = profile_top_k
+
+            if stream:
+                yield ("stage", {"stage": "retrieving", "label": "Đang truy hồi tài liệu liên quan..."})
 
             with tracer.start_as_current_span("retriever.build"):
                 retriever = build_retriever_from_env()
@@ -875,8 +986,35 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
 
                 retrieval_mode = getattr(router_output, "retrieval_mode", "article_centric")
                 t0 = time.time()
+                retrieval_cache_hit = False
+                retrieval_cache_key = None
+                chunks = []
 
-                if retrieval_mode == "mechanistic_synthesis" and retriever:
+                if retriever and bool(pipeline_info["retrieval_cache_enabled"]):
+                    retrieval_cache_key = pipeline_cache.key(
+                        "retrieval",
+                        {
+                            "query": search_query,
+                            "router": _router_fingerprint(router_output),
+                            "retrieval_mode": retrieval_mode,
+                            "top_k": profile_top_k,
+                            "collection": os.getenv("QDRANT_COLLECTION", ""),
+                            "embedding_model": os.getenv("EMBEDDING_MODEL", ""),
+                            "min_score": os.getenv("RAG_MIN_SCORE", ""),
+                            "max_context_tokens": os.getenv("RAG_MAX_CONTEXT_TOKENS", ""),
+                            "deduplicate": os.getenv("RAG_DEDUPLICATE", ""),
+                            "hybrid": os.getenv("RAG_ENABLE_HYBRID", ""),
+                            "article_index_path": os.getenv("RAG_ARTICLE_INDEX_PATH", ""),
+                        },
+                    )
+                    cached_chunks = pipeline_cache.get(retrieval_cache_key)
+                    if cached_chunks is not None:
+                        chunks = cached_chunks
+                        retrieval_cache_hit = True
+
+                if retrieval_cache_hit:
+                    span.set_attribute("retrieval.mode", "cache")
+                elif retrieval_mode == "mechanistic_synthesis" and retriever:
                     # Phase 4: Decomposed multi-axis retrieval
                     # Use heuristic decomposition (no LLM) to save API calls
                     from .mechanistic_query_decomposer import decompose_query
@@ -904,19 +1042,92 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         answer_style=router_output.answer_style,
                     ) if retriever else []
 
+                if retrieval_cache_key and not retrieval_cache_hit:
+                    pipeline_cache.set(retrieval_cache_key, chunks)
+
                 retrieval_ms = round((time.time() - t0) * 1000.0, 2)
                 span.set_attribute("retrieval.chunks", len(chunks))
+                span.set_attribute("retrieval.cache_hit", retrieval_cache_hit)
 
             RAG_RETRIEVAL_LATENCY_SECONDS.observe(retrieval_ms / 1000.0)
             request.state.retrieval_ms = retrieval_ms
             request.state.chunks_returned = len(chunks)
             timings_ms["retrieval_ms"] = retrieval_ms
+            cache_info["retrieval_hit"] = retrieval_cache_hit
+            pipeline_info["retrieval_hit"] = retrieval_cache_hit
 
             est_tokens = sum(max(1, len(c.text) // 4) for c in chunks)
             RAG_CONTEXT_TOKENS.observe(est_tokens)
 
             if not chunks:
                 RAG_EMPTY_CONTEXT_TOTAL.inc()
+
+            # ── 2.5a. Entity-fallback retrieval ──────────────────
+            # If specific entities were detected but are poorly represented
+            # in the retrieved set, fire a targeted secondary retrieval so
+            # the right entity content can actually be ranked by the aggregator.
+            entity_fallback_t0 = time.time()
+            if retriever and query_entities and retrieval_mode != "mechanistic_synthesis":
+                entity_phrase = " ".join(query_entities[:2])
+                if should_skip_entity_fallback(router_output, answer_mode):
+                    # General Standard query: primary retrieval is enough. Skipping
+                    # avoids a second hybrid lexical scan (the warm-path bottleneck).
+                    pipeline_info["entity_fallback_skipped"] = True
+                else:
+                    entity_hits_in_chunks = sum(
+                        1 for chunk in chunks
+                        if entity_phrase in _normalize_for_matching(chunk.text or "")[:2000]
+                        or entity_phrase in _normalize_for_matching(
+                            " ".join(str(v) for v in (chunk.metadata or {}).values() if isinstance(v, str))
+                        )
+                    )
+                    if entity_hits_in_chunks < 2:
+                        with tracer.start_as_current_span("retrieval.entity_fallback") as fb_span:
+                            fb_span.set_attribute("entity.phrase", entity_phrase)
+                            fb_top_k = min(8, profile_top_k // 2)
+                            fb_cache_key = None
+                            fb_chunks = None
+                            if bool(pipeline_info["retrieval_cache_enabled"]):
+                                fb_cache_key = pipeline_cache.key(
+                                    "entity_fallback",
+                                    {
+                                        "entity": entity_phrase,
+                                        "collection": os.getenv("QDRANT_COLLECTION", ""),
+                                        "retrieval_mode": retrieval_mode,
+                                        "query_type": router_output.query_type,
+                                        "answer_style": router_output.answer_style,
+                                        "top_k": fb_top_k,
+                                        "min_score": os.getenv("RAG_MIN_SCORE", ""),
+                                        "hybrid": os.getenv("RAG_ENABLE_HYBRID", ""),
+                                        "article_index_path": os.getenv("RAG_ARTICLE_INDEX_PATH", ""),
+                                    },
+                                )
+                                cached_fb = pipeline_cache.get(fb_cache_key)
+                                if cached_fb is not None:
+                                    fb_chunks = cached_fb
+                                    pipeline_info["entity_fallback_cache_hit"] = True
+                            if fb_chunks is None:
+                                fb_chunks = retriever.retrieve(
+                                    entity_phrase,
+                                    top_k_override=fb_top_k,
+                                    retrieval_mode=retrieval_mode,
+                                    query_type=router_output.query_type,
+                                    answer_style=router_output.answer_style,
+                                )
+                                if fb_cache_key is not None:
+                                    pipeline_cache.set(fb_cache_key, fb_chunks)
+                            existing_ids = {getattr(c, "id", None) for c in chunks}
+                            new_chunks = [c for c in fb_chunks if getattr(c, "id", None) not in existing_ids]
+                            chunks.extend(new_chunks)
+                            pipeline_info["entity_fallback_used"] = True
+                            pipeline_info["entity_fallback_added"] = len(new_chunks)
+                            fb_span.set_attribute("entity_fallback.hits_before", entity_hits_in_chunks)
+                            fb_span.set_attribute("entity_fallback.added", len(new_chunks))
+                            fb_span.set_attribute(
+                                "entity_fallback.cache_hit",
+                                bool(pipeline_info["entity_fallback_cache_hit"]),
+                            )
+            timings_ms["entity_fallback_ms"] = round((time.time() - entity_fallback_t0) * 1000.0, 2)
 
             # ── 2.5. Chunk Quality Filter (Phase 4) ──────────────
             with tracer.start_as_current_span("chunk.quality_filter") as span:
@@ -925,6 +1136,9 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 span.set_attribute("filter.before", pre_filter_count)
                 span.set_attribute("filter.after", len(chunks))
                 span.set_attribute("filter.removed", pre_filter_count - len(chunks))
+
+            if stream:
+                yield ("stage", {"stage": "analyzing", "label": "Đang phân tích và chọn nguồn evidence..."})
 
             # ── 3. Article Aggregation ───────────────────────────
             with tracer.start_as_current_span("article.aggregate") as span:
@@ -1000,6 +1214,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         pipeline_cache.set(evidence_cache_key, evidence_pack)
 
                 cache_info["evidence_extract_hit"] = evidence_cache_hit
+                pipeline_info["llm_extractor_enabled"] = extractor_enabled
+                pipeline_info["llm_extractor_used"] = bool(evidence_pack.extractor_used)
                 span.set_attribute("evidence.cache_hit", evidence_cache_hit)
                 span.set_attribute("evidence.extractor_used", evidence_pack.extractor_used)
                 span.set_attribute("evidence.numbers_found", len(evidence_pack.primary_source.numbers))
@@ -1040,7 +1256,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 )
                 answer_plan_text = format_answer_plan_for_prompt(answer_plan)
                 reranked_articles_text = _format_reranked_articles_for_prompt(aggregated, answer_mode)
-                mode_instruction = _answer_mode_instruction(answer_mode)
+                mode_instruction = _answer_mode_instruction(answer_mode, coverage)
                 if getattr(router_output, "query_type", "") == "source_discovery":
                     mode_instruction = f"{mode_instruction}\n\n{_source_discovery_instruction()}"
                 if reranked_articles_text:
@@ -1050,6 +1266,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     if answer_plan_text
                     else mode_instruction
                 )
+                pipeline_info["answer_planner_llm_used"] = planner_llm is not None
                 span.set_attribute("answer_plan.enabled", answer_plan.enabled)
                 span.set_attribute("answer_plan.status", answer_plan.status)
 
@@ -1062,6 +1279,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                 else:
                     external_pack = ExternalEvidencePack(enabled=False, status="not_needed")
                 external_sources_text = format_external_sources_for_prompt(external_pack)
+                pipeline_info["external_resolver_used"] = bool(getattr(external_pack, "sources", []))
                 span.set_attribute("external.status", external_pack.status)
                 span.set_attribute("external.sources", len(external_pack.sources))
 
@@ -1079,6 +1297,9 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     answer_plan_text=answer_plan_text,
                     external_sources_text=external_sources_text,
                 )
+
+            if stream:
+                yield ("stage", {"stage": "composing", "label": "Đang soạn câu trả lời..."})
 
             with tracer.start_as_current_span("llm.inference") as span:
                 span.set_attribute(
@@ -1110,12 +1331,25 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             answer_attempt_budget = int(os.getenv("STANDARD_ANSWER_MAX_ATTEMPTS", "1"))
                         temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
                         try:
-                            answer = kserve.generate(
-                                messages_payload,
-                                max_tokens=max_tokens,
-                                temperature=temperature,
-                                attempt_budget=answer_attempt_budget,
-                            )
+                            if stream:
+                                _answer_parts: list[str] = []
+                                for _delta in kserve.generate_stream(
+                                    messages_payload,
+                                    max_tokens=max_tokens,
+                                    temperature=temperature,
+                                ):
+                                    _answer_parts.append(_delta)
+                                    yield ("token", {"delta": _delta})
+                                answer = "".join(_answer_parts).strip()
+                                if not answer:
+                                    raise RuntimeError("LLM returned empty streamed answer")
+                            else:
+                                answer = kserve.generate(
+                                    messages_payload,
+                                    max_tokens=max_tokens,
+                                    temperature=temperature,
+                                    attempt_budget=answer_attempt_budget,
+                                )
                         except UpstreamRateLimitError as exc:
                             RAG_FALLBACK_TOTAL.inc()
                             request.state.error_message = str(exc)
@@ -1159,11 +1393,12 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             answer = _build_degraded_mode_answer(degraded_reason)
                 llm_ms = round((time.time() - g0) * 1000.0, 2)
 
-            kserve = build_kserve_client_from_env()
-
             RAG_GENERATION_LATENCY_SECONDS.observe(llm_ms / 1000.0)
             request.state.llm_ms = llm_ms
             timings_ms["llm_answer_ms"] = llm_ms
+
+            if stream:
+                yield ("stage", {"stage": "finalizing", "label": "Đang kiểm tra và hoàn thiện..."})
 
             verification_status = "skipped"
             verification_issues = []
@@ -1183,6 +1418,8 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                         if use_llm_verifier
                         else None
                     )
+                    pipeline_info["llm_verifier_requested"] = use_llm_verifier
+                    pipeline_info["llm_verifier_used"] = verifier_llm is not None
                     verifier_cache_hit = False
                     verifier_cache_key = None
                     verification = None
@@ -1210,6 +1447,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                             verifier_cache_hit = True
 
                     if verification is None:
+                        pipeline_info["deterministic_verifier_run"] = True
                         verification = verify_answer(
                             question=search_query,
                             answer=answer,
@@ -1262,6 +1500,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
                     "verification_issues": verification_issues[:10],
                     "timings_ms": timings_ms,
                     "cache": cache_info,
+                    "pipeline": pipeline_info,
                 }
             external_sources_out = [
                     {
@@ -1290,16 +1529,63 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
             # reload full history
             history = session_store.get_history(session_id)
 
-            return ChatResponse(
-                session_id=session_id,
-                answer=answer,
-                history=history,
-                context_used=len(chunks),
-                retrieved_chunks=chunks_out,
-                metadata=response_metadata,
-                external_sources=external_sources_out,
-                degraded_mode=degraded_mode,
-                degraded_reason=degraded_reason,
-            )
+            final_payload = {
+                "session_id": session_id,
+                "answer": answer,
+                "history": history,
+                "context_used": len(chunks),
+                "retrieved_chunks": chunks_out,
+                "metadata": response_metadata,
+                "external_sources": external_sources_out,
+                "degraded_mode": degraded_mode,
+                "degraded_reason": degraded_reason,
+            }
+            yield ("final", final_payload)
     finally:
         RAG_INFLIGHT.dec()
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
+    """Non-streaming chat: drive the shared pipeline and return the final payload."""
+    final_payload = None
+    for kind, payload in _chat_core(req, request, background_tasks, stream=False):
+        if kind == "final":
+            final_payload = payload
+    if final_payload is None:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Chat pipeline produced no answer."},
+        )
+    return ChatResponse(**final_payload)
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
+    """Streaming chat over Server-Sent Events.
+
+    Emits one ``data: {...}\\n\\n`` line per event. Each JSON carries a ``type``
+    field: ``stage`` (progress), ``token`` (answer delta), ``final`` (full
+    payload identical to /api/chat), or ``error``.
+    """
+
+    def _sse(kind: str, payload: dict) -> str:
+        body = json.dumps({"type": kind, **payload}, ensure_ascii=False, default=str)
+        return f"data: {body}\n\n"
+
+    def event_gen():
+        try:
+            for kind, payload in _chat_core(req, request, background_tasks, stream=True):
+                yield _sse(kind, payload)
+        except Exception as exc:  # defensive: never leave the stream hanging
+            yield _sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

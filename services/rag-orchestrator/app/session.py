@@ -47,9 +47,39 @@ class SessionStore:
 
     def get_history(self, session_id: str) -> List[Dict]:
         if self.redis_enabled:
-            data = self._client.get(session_id)
-            return json.loads(data) if data else []
+            try:
+                data = self._client.get(session_id)
+            except Exception:
+                # Key holds a non-string Redis type, or transient error: treat as empty.
+                return []
+            if not data:
+                return []
+            try:
+                parsed = json.loads(data)
+            except (ValueError, TypeError):
+                # Corrupt / non-session payload under this key: never crash the caller.
+                return []
+            return parsed if isinstance(parsed, list) else []
         return self._memory_store.get(session_id, [])
+
+    def _is_session_history_key(self, key: str) -> bool:
+        """True only if ``key`` holds a chat history (a JSON list).
+
+        Redis is shared between session histories and helper keys (titles,
+        topics, updated_at markers, pipeline cache). Listing sessions must
+        ignore everything that is not an actual history, and must never raise
+        if a key holds an unexpected value/type.
+        """
+        try:
+            raw = self._client.get(key)
+        except Exception:
+            return False
+        if not raw:
+            return False
+        try:
+            return isinstance(json.loads(raw), list)
+        except (ValueError, TypeError):
+            return False
 
     def _session_updated_at(self, session_id: str, history: List[Dict] | None = None) -> float:
         if self.redis_enabled:
@@ -73,17 +103,27 @@ class SessionStore:
         if self.redis_enabled:
             all_keys = self._client.keys("*")
             cache_prefix = os.getenv("PIPELINE_CACHE_PREFIX", "rag:pipeline")
-            ignored_prefixes = ("title:", "updated_at:", f"{cache_prefix}:", "session:")
-            session_ids = [
-                k for k in all_keys
-                if not any(k.startswith(prefix) for prefix in ignored_prefixes)
-            ]
-            
+            ignored_prefixes = (
+                "title:",
+                "updated_at:",
+                "topic:",
+                f"{cache_prefix}:",
+                "session:",
+            )
+
             result = []
-            for sid in session_ids:
-                # To prevent errors if the session key is something else, double check
-                title = self._client.get(f"title:{sid}") or "Cuộc trò chuyện"
-                updated_at = self._session_updated_at(sid)
+            for sid in all_keys:
+                if any(sid.startswith(prefix) for prefix in ignored_prefixes):
+                    continue
+                # Only treat keys that actually hold a chat history as sessions.
+                if not self._is_session_history_key(sid):
+                    continue
+                try:
+                    title = self._client.get(f"title:{sid}") or "Cuộc trò chuyện"
+                    updated_at = self._session_updated_at(sid)
+                except Exception:
+                    # Defensive: skip any key that misbehaves rather than 500 the sidebar.
+                    continue
                 result.append({"id": sid, "title": title, "updated_at": updated_at})
             result.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
             return result
@@ -124,13 +164,30 @@ class SessionStore:
         else:
             self._memory_store[session_id] = history
 
+    def get_topic(self, session_id: str) -> str:
+        """Return the stored topic entity phrase for this session, or empty string."""
+        if self.redis_enabled:
+            return self._client.get(f"topic:{session_id}") or ""
+        return self._memory_titles.get(f"topic:{session_id}", "")
+
+    def set_topic(self, session_id: str, topic: str):
+        """Persist the primary topic entity phrase for this session."""
+        if not topic:
+            return
+        if self.redis_enabled:
+            self._client.setex(f"topic:{session_id}", self.ttl, topic)
+        else:
+            self._memory_titles[f"topic:{session_id}"] = topic
+
     def delete_session(self, session_id: str):
         """Delete a session's history and title."""
         if self.redis_enabled:
             self._client.delete(session_id)
             self._client.delete(f"title:{session_id}")
             self._client.delete(f"updated_at:{session_id}")
+            self._client.delete(f"topic:{session_id}")
         else:
             self._memory_store.pop(session_id, None)
             self._memory_titles.pop(session_id, None)
+            self._memory_titles.pop(f"topic:{session_id}", None)
 

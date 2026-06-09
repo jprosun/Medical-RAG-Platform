@@ -401,7 +401,18 @@ def _group_chunks_by_article(chunks: List[RetrievedChunk]) -> List[ArticleGroup]
 
 # ── Authority & query-fit tables ─────────────────────────────────────
 
-_TRUST_TIER_BOOST = {1: 0.08, 2: 0.04, 3: 0.0}
+_TRUST_TIER_BOOST = {1: 0.14, 2: 0.08, 3: 0.0}
+
+# For clinical/research queries the authority signal is amplified so tier-1/2
+# sources outcompete the large tier-3 (consumer blog) majority.
+_QUERY_TYPE_AUTHORITY_MULTIPLIER = {
+    "research_appraisal":      2.0,
+    "study_result_extraction": 2.0,
+    "professional_explainer":  1.5,
+    "comparative_synthesis":   1.5,
+    "guideline_comparison":    1.5,
+    "teaching_explainer":      1.3,
+}
 
 _DOC_TYPE_BOOST = {
     "guideline": 0.06,
@@ -537,9 +548,25 @@ def _compute_article_score(
         except (ValueError, TypeError):
             tier = 3
     trust_boost = _TRUST_TIER_BOOST.get(tier, 0.0)
+    if router_output is not None:
+        authority_multiplier = _QUERY_TYPE_AUTHORITY_MULTIPLIER.get(
+            getattr(router_output, "query_type", ""), 1.0
+        )
+        trust_boost = trust_boost * authority_multiplier
 
     doc_type = md.get("doc_type", "") or ""
     dtype_boost = _DOC_TYPE_BOOST.get(doc_type, 0.0)
+
+    # Extra penalty: tier-3 patient_education for clinical research queries
+    if (
+        tier == 3
+        and doc_type == "patient_education"
+        and router_output is not None
+        and getattr(router_output, "query_type", "") in {
+            "research_appraisal", "study_result_extraction", "professional_explainer"
+        }
+    ):
+        dtype_boost -= 0.06
 
     authority = trust_boost + dtype_boost
 
@@ -605,7 +632,7 @@ def _is_secondary_candidate(
     router_output: Optional["RouterOutput"] = None,
 ) -> bool:
     """Reject weak support articles before they contaminate augmentation."""
-    _, specific_overlap, acronym_coverage = _query_alignment(article, query)
+    kw_score, specific_overlap, acronym_coverage = _query_alignment(article, query)
     query_acronyms = _extract_query_acronyms(query)
     if query_acronyms:
         if acronym_coverage == 0.0:
@@ -617,7 +644,23 @@ def _is_secondary_candidate(
     query_type = getattr(router_output, "query_type", "") if router_output else ""
     answer_mode = getattr(router_output, "answer_mode", "") if router_output else ""
     min_overlap = 1 if mode == "mechanistic_synthesis" or query_type == "source_discovery" or answer_mode == "thinking" else 2
-    return specific_overlap >= min_overlap
+
+    if specific_overlap >= min_overlap:
+        return True
+
+    # Many Vietnamese medical terms are 2-3 chars (e.g. "hắc"=3, "tố"=2, "ung"=3, "thư"=3),
+    # so specific_overlap (which requires len>=4) is always 0 for such queries.
+    # Fall back to counting overlapping short terms against article metadata.
+    query_kw = _extract_keywords(query)
+    if query_kw and not any(len(t) >= 4 for t in query_kw):
+        # Require at least 2/3 of query terms to match article metadata
+        short_threshold = max(2, len(query_kw) * 2 // 3)
+        article_kw = _extract_keywords(_metadata_text(article))
+        overlap_count = sum(1 for t in query_kw if t in article_kw)
+        if overlap_count >= short_threshold:
+            return True
+
+    return False
 
 
 def _requires_distinct_secondary_support(router_output: Optional["RouterOutput"]) -> bool:
@@ -769,6 +812,7 @@ def aggregate_articles(
         score_threshold = 0.80
         max_primary_chunks = 4
         max_sec_chunks = 2
+        answer_mode = ""
     if not chunks:
         empty = ArticleGroup(title="", title_norm="", chunks=[])
         return AggregatedResult(primary=empty, secondary=[], all_articles=[])
@@ -793,7 +837,12 @@ def aggregate_articles(
     primary.chunks = primary.chunks[:max_primary_chunks]
 
     if router_output and getattr(router_output, "retrieval_mode", "article_centric") == "article_centric":
-        return AggregatedResult(primary=primary, secondary=[], all_articles=articles)
+        if answer_mode != "thinking":
+            return AggregatedResult(primary=primary, secondary=[], all_articles=articles)
+        # thinking mode: allow secondaries through score + entity filter
+        max_secondary = 3
+        score_threshold = 0.70
+        max_sec_chunks = 2
 
     secondary = []
     for art in articles:

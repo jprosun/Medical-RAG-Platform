@@ -46,6 +46,7 @@ export type ChatMetadata = {
   external_search_status?: string;
   timings_ms?: Record<string, number>;
   cache?: Record<string, boolean>;
+  pipeline?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -63,6 +64,8 @@ export type ChatMessage = {
   _local_id?: string;
   _pending?: boolean;
   _error?: boolean;
+  _stageLabel?: string;
+  _streaming?: boolean;
 };
 
 export type ChatResponse = {

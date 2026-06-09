@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { checkReadiness, getSession, listSessions, sendChat } from "./api/client";
+import { checkReadiness, getSession, listSessions, sendChat, sendChatStream } from "./api/client";
 import { ChatComposer } from "./components/ChatComposer";
 import { MessageBubble, type SourceSelection } from "./components/MessageBubble";
 import { Sidebar } from "./components/Sidebar";
 import { SourceDetailPanel } from "./components/SourceDetailPanel";
-import type { AnswerMode, ChatMessage, SessionSummary } from "./types/rag";
+import type { AnswerMode, ChatMessage, ChatResponse, SessionSummary } from "./types/rag";
 import { buildRagSources } from "./utils/sources";
 
 const ACTIVE_SESSION_KEY = "medqa.activeSessionId";
@@ -154,9 +154,9 @@ export default function App() {
 
     setMessages((current) => [...current, userMessage, pendingMessage]);
 
-    try {
-      const startedAt = performance.now();
-      const response = await sendChat({ sessionId, message: question, answerMode: mode });
+    const startedAt = performance.now();
+
+    const finalizeFromResponse = (response: ChatResponse) => {
       const durationMs = performance.now() - startedAt;
       const nextHistory =
         response.history?.length > 0
@@ -176,20 +176,88 @@ export default function App() {
                 degraded_reason: response.degraded_reason,
               },
             ];
-
       setMessages(nextHistory);
       setSelectedSource(latestAssistantSource(nextHistory));
+    };
+
+    let receivedAny = false;
+    let gotFinal = false;
+
+    try {
+      await sendChatStream(
+        { sessionId, message: question, answerMode: mode },
+        (event) => {
+          receivedAny = true;
+          if (event.type === "stage") {
+            setMessages((current) =>
+              current.map((item) =>
+                item._local_id === pendingId ? { ...item, _stageLabel: event.label } : item,
+              ),
+            );
+          } else if (event.type === "token") {
+            setMessages((current) =>
+              current.map((item) =>
+                item._local_id === pendingId
+                  ? {
+                      ...item,
+                      content: item.content + event.delta,
+                      _pending: false,
+                      _streaming: true,
+                      _stageLabel: undefined,
+                    }
+                  : item,
+              ),
+            );
+          } else if (event.type === "error") {
+            throw new Error(event.detail || "Lỗi khi tạo câu trả lời.");
+          } else if (event.type === "final") {
+            gotFinal = true;
+            finalizeFromResponse(event);
+          }
+        },
+      );
+
+      if (!gotFinal) {
+        throw new Error("Luồng trả lời kết thúc bất thường.");
+      }
       await refreshSessions();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Gửi câu hỏi thất bại.";
+    } catch (streamErr) {
+      // Only safe to retry via the non-streaming endpoint if the stream never
+      // opened — otherwise the backend already recorded this turn and a retry
+      // would duplicate the question.
+      if (!receivedAny) {
+        try {
+          const response = await sendChat({ sessionId, message: question, answerMode: mode });
+          finalizeFromResponse(response);
+          await refreshSessions();
+          return;
+        } catch (fallbackErr) {
+          const message = fallbackErr instanceof Error ? fallbackErr.message : "Gửi câu hỏi thất bại.";
+          setError(message);
+          setMessages((current) =>
+            current.map((item) =>
+              item._local_id === pendingId
+                ? { ...item, content: `Không thể tạo câu trả lời.\n\n${message}`, _pending: false, _streaming: false, _error: true }
+                : item,
+            ),
+          );
+          return;
+        }
+      }
+
+      if (gotFinal) return;
+      const message = streamErr instanceof Error ? streamErr.message : "Gửi câu hỏi thất bại.";
       setError(message);
       setMessages((current) =>
         current.map((item) =>
           item._local_id === pendingId
             ? {
                 ...item,
-                content: `Không thể tạo câu trả lời.\n\n${message}`,
+                content: item.content
+                  ? `${item.content}\n\n_(Bị gián đoạn: ${message})_`
+                  : `Không thể tạo câu trả lời.\n\n${message}`,
                 _pending: false,
+                _streaming: false,
                 _error: true,
               }
             : item,

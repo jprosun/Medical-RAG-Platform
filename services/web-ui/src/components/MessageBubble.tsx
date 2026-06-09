@@ -139,8 +139,12 @@ export function MessageBubble({
             <span />
             <span />
             <span />
-            Đang retrieval, rerank và viết câu trả lời...
+            {message._stageLabel || "Đang retrieval, rerank và viết câu trả lời..."}
           </div>
+        )}
+
+        {message._streaming && !message._pending && (
+          <div className="streamingHint">Đang trả lời…</div>
         )}
 
         {sources.length > 0 && (

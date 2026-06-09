@@ -90,3 +90,70 @@ export async function sendChat(params: {
     }),
   });
 }
+
+export type StreamEvent =
+  | { type: "stage"; stage: string; label: string }
+  | { type: "token"; delta: string }
+  | { type: "final" } & ChatResponse
+  | { type: "error"; detail: string };
+
+/**
+ * Stream a chat answer over SSE. Calls onEvent for every server event
+ * (stage progress, answer token, final payload). Throws before the first
+ * event if the stream cannot be opened, so the caller can fall back to
+ * the non-streaming endpoint.
+ */
+export async function sendChatStream(
+  params: { sessionId: string; message: string; answerMode: AnswerMode },
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({
+      session_id: params.sessionId,
+      message: params.message,
+      answer_mode: params.answerMode,
+    }),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Stream failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const flush = (chunk: string) => {
+    buffer += chunk;
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const raw = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const dataLine = raw
+        .split("\n")
+        .find((line) => line.startsWith("data:"));
+      if (dataLine) {
+        const json = dataLine.slice(5).trim();
+        if (json) {
+          try {
+            onEvent(JSON.parse(json) as StreamEvent);
+          } catch {
+            // Ignore malformed SSE frames; keep reading the stream.
+          }
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    flush(decoder.decode(value, { stream: true }));
+  }
+  flush(decoder.decode());
+}

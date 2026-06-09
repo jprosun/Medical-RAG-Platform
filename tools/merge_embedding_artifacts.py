@@ -107,6 +107,7 @@ def merge_embedding_artifacts(
 
     texts_output = data_paths.chunk_texts_export_path(dataset_id=output_dataset_id, profile=profile)
     metadata_output = data_paths.chunk_metadata_export_path(dataset_id=output_dataset_id, profile=profile)
+    kaggle_output = data_paths.kaggle_embedding_input_path(dataset_id=output_dataset_id, profile=profile)
     ids_output = data_paths.embedding_ids_path(dataset_id=output_dataset_id, profile=profile)
     vectors_output = data_paths.embedding_vectors_path(dataset_id=output_dataset_id, profile=profile)
     manifest_output = data_paths.embeddings_staging_dir(profile, dataset_id=output_dataset_id) / "embedding_manifest.json"
@@ -114,6 +115,16 @@ def merge_embedding_artifacts(
 
     _write_jsonl(texts_output, merged_texts)
     _write_jsonl(metadata_output, merged_metadata)
+    merged_kaggle_rows = []
+    for text_row, metadata_row in zip(merged_texts, merged_metadata):
+        merged_kaggle_rows.append(
+            {
+                "id": text_row["id"],
+                "text": text_row.get("text", ""),
+                "metadata": metadata_row.get("metadata", {}),
+            }
+        )
+    _write_jsonl(kaggle_output, merged_kaggle_rows)
     ids_output.parent.mkdir(parents=True, exist_ok=True)
     ids_output.write_text(json.dumps(merged_ids, ensure_ascii=False), encoding="utf-8")
     np.save(vectors_output, merged_vectors)
@@ -141,6 +152,7 @@ def merge_embedding_artifacts(
         },
         "texts_output": str(texts_output),
         "metadata_output": str(metadata_output),
+        "kaggle_output": str(kaggle_output),
         "ids_output": str(ids_output),
         "vectors_output": str(vectors_output),
         "manifest_output": str(manifest_output),

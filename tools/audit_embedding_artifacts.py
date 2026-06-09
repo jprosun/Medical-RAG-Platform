@@ -105,7 +105,7 @@ def _summarize_file(path: Path) -> dict[str, Any]:
     return summary
 
 
-def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
+def audit_embedding_artifacts(dataset_id: str, profile: str, *, export_only: bool = False) -> dict[str, Any]:
     ids_path = embedding_ids_path(dataset_id=dataset_id, profile=profile)
     vectors_path = embedding_vectors_path(dataset_id=dataset_id, profile=profile)
     metadata_path = chunk_metadata_export_path(dataset_id=dataset_id, profile=profile)
@@ -161,12 +161,30 @@ def audit_embedding_artifacts(dataset_id: str, profile: str) -> dict[str, Any]:
         "kaggle_input_has_no_empty_texts": kaggle_empty_texts == 0,
         "kaggle_input_no_duplicate_ids": _dupe_count(kaggle_ids) == 0,
     }
+    if export_only:
+        checks = {
+            key: value
+            for key, value in checks.items()
+            if key
+            in {
+                "metadata_loaded",
+                "texts_loaded",
+                "no_duplicate_metadata_ids",
+                "no_duplicate_text_ids",
+                "kaggle_input_loaded",
+                "kaggle_input_order_matches_texts",
+                "kaggle_input_order_matches_metadata",
+                "kaggle_input_has_no_empty_texts",
+                "kaggle_input_no_duplicate_ids",
+            }
+        }
     status = "pass" if all(checks.values()) else "fail"
 
     return {
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "dataset_id": dataset_id,
         "profile": profile,
+        "export_only": export_only,
         "status": status,
         "files": {
             "ids": _summarize_file(ids_path),
@@ -222,10 +240,11 @@ def main() -> None:
     parser.add_argument("--dataset-id", required=True)
     parser.add_argument("--profile", default=DEFAULT_EMBEDDING_PROFILE)
     parser.add_argument("--output", default="")
+    parser.add_argument("--export-only", action="store_true", help="Only audit chunk export files before embeddings exist.")
     parser.add_argument("--no-fail", action="store_true", help="Always exit 0 after writing the report.")
     args = parser.parse_args()
 
-    report = audit_embedding_artifacts(args.dataset_id, args.profile)
+    report = audit_embedding_artifacts(args.dataset_id, args.profile, export_only=args.export_only)
     output = write_report(report, args.output or None)
     print(json.dumps({
         "status": report["status"],

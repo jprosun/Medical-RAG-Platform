@@ -12,7 +12,7 @@ Theo code hien tai:
 
 - `services/rag-orchestrator/app/prompt.py` da co `open_enriched`
 - `services/rag-orchestrator/app/answer_verifier.py` da phat answer qua ngan
-- `retrieval_deep_dive.md` cho thay chunk metadata duoc dung nhieu trong retrieval va evidence extraction
+- `docs/architecture/retrieval-deep-dive.md` cho thay chunk metadata duoc dung nhieu trong retrieval va evidence extraction
 
 Nen nut that lon nhat o day la `evidence quality`, khong phai chi la `response length`.
 

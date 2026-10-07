@@ -1,11 +1,15 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 .persist/
 temp_files/
 .DS_Store
 .vscode/
 .idea/
+.claude/
+.agents/
 *.log
 node_modules/
 dist/
@@ -39,7 +43,7 @@ ci/env
 jenkins-gke.json
 
 # Data files and directories
-data/
+/data/
 rag-data/
 benchmark/
 !benchmark/
@@ -73,7 +77,6 @@ notebooks/
 *.parquet
 
 # Exceptions to global ignores
-!BaoCao_DATN_MedQA.docx
 !package.json
 !package-lock.json
 !tsconfig.json

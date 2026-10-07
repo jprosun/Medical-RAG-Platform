@@ -51,7 +51,7 @@ rag-orchestrator:
       memory: 1Gi
   llm:
     enabled: true
-    baseUrl: "http://220.130.209.122:41496"
+    baseUrl: "http://<llm-host>:<port>"  # set to your OpenAI-compatible endpoint
     completionsPath: "/v1/chat/completions"
     modelId: "mistralai/Mistral-7B-Instruct-v0.2"
 

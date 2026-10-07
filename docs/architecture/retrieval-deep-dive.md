@@ -1,6 +1,8 @@
 # Retrieval System — Chi tiết toàn bộ
 
 > Mọi thông tin trích dẫn trực tiếp từ source code thực tế.
+>
+> **Ghi chú (10/2026):** Tài liệu này mô tả code trên `main` ở thời điểm 06/2026. Các số Gate G3 bên dưới (Hit@k 93–97% cho 100 câu VN; 89,7% Title Hit@3 cho 68 câu EN) là số đo trong lúc phát triển, không phải kết quả đánh giá: số VN được đo bằng evaluator có reranker riêng (`gate_g3_eval.py`) trên một gold set không có trong repo, còn số EN không có file kết quả đi kèm. Số đánh giá đã kiểm chứng nằm ở mục Evaluation của [README](../../README.md).
 
 ---
 
@@ -41,7 +43,7 @@ Context cho Answer Composer
 
 ## Bước ① — Query Rewriter
 
-**File:** [query_rewriter.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/rag-orchestrator/app/query_rewriter.py)
+**File:** [query_rewriter.py](../../services/rag-orchestrator/app/query_rewriter.py)
 
 ### Mục đích
 Biến câu follow-up ngắn (ví dụ "còn tác dụng phụ thì sao?") thành câu hỏi độc lập để retriever tìm đúng.
@@ -79,7 +81,7 @@ Rule fallback → "Regarding What is asthma: Can it be cured?"
 
 ## Bước ② — Query Router
 
-**File:** [query_router.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/rag-orchestrator/app/query_router.py)
+**File:** [query_router.py](../../services/rag-orchestrator/app/query_router.py)
 
 ### Mục đích
 Phân loại query → xác định **retrieval profile** (bao nhiêu chunks cần lấy) và **có cần Evidence Extractor không**.
@@ -118,7 +120,7 @@ Nếu không match keyword nào: dựa vào **độ dài query**:
 
 ## Bước ③ — Auto Filter Detector
 
-**File:** [retriever.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/rag-orchestrator/app/retriever.py) → `detect_filters_from_query()`
+**File:** [retriever.py](../../services/rag-orchestrator/app/retriever.py) → `detect_filters_from_query()`
 
 ### Mục đích
 Phân tích query → tự động gán Qdrant payload filter để thu hẹp search space.
@@ -278,7 +280,7 @@ Metadata 15 fields: `doc_id, title, section_title, source_name, source_url, doc_
 
 ## Bước ⑦ — Article Aggregator
 
-**File:** [article_aggregator.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/rag-orchestrator/app/article_aggregator.py)
+**File:** [article_aggregator.py](../../services/rag-orchestrator/app/article_aggregator.py)
 
 ### Mục đích
 Chuyển top-K chunks thành **1 primary article + 0-2 secondary articles**.
@@ -349,7 +351,7 @@ Query: "Tương tác thuốc trong thực hành lâm sàng tại bệnh viện �
 
 ## Bước ⑧ — Evidence Extractor
 
-**File:** [evidence_extractor.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/rag-orchestrator/app/evidence_extractor.py)
+**File:** [evidence_extractor.py](../../services/rag-orchestrator/app/evidence_extractor.py)
 
 ### Mục đích
 Chuyển raw chunks thành **structured evidence pack** có cấu trúc cho Answer Composer.
@@ -423,7 +425,7 @@ EvidencePack
 
 ## Phía Ingestion — Chunks được tạo như thế nào
 
-**File:** [ingest.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/qdrant-ingestor/app/ingest.py)
+**File:** [ingest.py](../../services/qdrant-ingestor/app/ingest.py)
 
 ### Structure-aware chunking
 
@@ -490,7 +492,7 @@ Mỗi chunk trong Qdrant mang **15 metadata fields** (top-level payload):
 
 ### Gate G3 — Benchmark chính
 
-**File:** [gate_g3_eval.py](file:///d:/CODE/DATN/LLM-MedQA-Assistant/services/qdrant-ingestor/gate_g3_eval.py)
+**File:** [gate_g3_eval.py](../../services/qdrant-ingestor/gate_g3_eval.py)
 
 ### Cách hoạt động
 

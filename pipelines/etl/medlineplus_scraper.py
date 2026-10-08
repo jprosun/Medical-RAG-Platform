@@ -52,7 +52,7 @@ MEDLINEPLUS_XML_URL = "https://medlineplus.gov/xml/mplus_topics_2026-03-10.xml"
 MEDLINEPLUS_XML_FALLBACK = "https://medlineplus.gov/xml/mplus_topics.xml"
 USER_AGENT = (
     "MedQA-RAG-ETL/1.0 (academic research; "
-    "https://github.com/lehuyphuong/LLM-MedQA-Assistant)"
+    "https://github.com/jprosun/Medical-RAG-Platform)"
 )
 REQUEST_TIMEOUT = 60
 SOURCE_ID = "medlineplus"

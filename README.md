@@ -39,8 +39,6 @@ The project covers the path from raw web pages to a cited answer in a chat windo
 
 **Reference deployment**: Helm charts, Terraform for a GKE cluster and a Jenkins pipeline (see [Kubernetes reference deployment](#kubernetes-reference-deployment)).
 
-This repository builds on [lehuyphuong/LLM-MedQA-Assistant](https://github.com/lehuyphuong/LLM-MedQA-Assistant): the deployment files above and the first version of the orchestrator, Streamlit UI and ingestor come from that project. The data pipeline, the query routing, the hybrid lexical index and re-scoring built on the upstream dense retriever, the aggregation, evidence and verification stages, SSE streaming and the React UI were added here.
-
 ## Architecture
 
 ```mermaid
@@ -335,7 +333,7 @@ The first orchestrator run downloads a small fastembed model. In the second suit
 
 ## Kubernetes reference deployment
 
-These files come from the upstream project [lehuyphuong/LLM-MedQA-Assistant](https://github.com/lehuyphuong/LLM-MedQA-Assistant) (most charts are byte-identical) and have not been kept in sync with the compose stack. They have not been verified end to end.
+These files date from the project's initial version and have not been kept in sync with the compose stack. They have not been verified end to end.
 
 | Part | What it contains | Status |
 |---|---|---|
@@ -402,6 +400,6 @@ These files come from the upstream project [lehuyphuong/LLM-MedQA-Assistant](htt
 
 - [docs/data/workflow.md](docs/data/workflow.md): data layout, naming contract and pipeline commands.
 - [docs/architecture/retrieval-deep-dive.md](docs/architecture/retrieval-deep-dive.md): step-by-step retrieval walkthrough (Vietnamese).
-- [charts/README.md](charts/README.md): Helm chart design notes from the upstream project; some statements, such as PVC-backed storage, do not match the templates.
-- [ci/README.md](ci/README.md): Jenkins setup notes from the upstream project (text only; the screenshots it references are not in this repository).
+- [charts/README.md](charts/README.md): Helm chart design notes; some statements, such as PVC-backed storage, do not match the templates.
+- [ci/README.md](ci/README.md): Jenkins setup notes (text only; the screenshots it references are not in this repository).
 - Evaluation: [jprosun/vi-medrag-audit](https://github.com/jprosun/vi-medrag-audit). To cite the paper or the artifact, use its [CITATION.cff](https://github.com/jprosun/vi-medrag-audit/blob/HEAD/CITATION.cff).

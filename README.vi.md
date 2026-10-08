@@ -39,8 +39,6 @@ Dự án bao quát toàn bộ đường đi từ trang web thô đến một câ
 
 **Triển khai tham chiếu**: Helm chart, Terraform cho một cluster GKE và một pipeline Jenkins (xem [Triển khai tham chiếu trên Kubernetes](#triển-khai-tham-chiếu-trên-kubernetes)).
 
-Repository này được xây dựng tiếp trên [lehuyphuong/LLM-MedQA-Assistant](https://github.com/lehuyphuong/LLM-MedQA-Assistant): các file triển khai nói trên và phiên bản đầu tiên của orchestrator, Streamlit UI và ingestor đến từ dự án đó. Pipeline dữ liệu, query routing, hybrid lexical index và bước chấm lại điểm (re-scoring) xây trên dense retriever của upstream, các bước aggregation, evidence và verification, SSE streaming và React UI được bổ sung tại đây.
-
 ## Kiến trúc
 
 ```mermaid
@@ -335,7 +333,7 @@ Lần chạy orchestrator đầu tiên sẽ tải một model fastembed nhỏ. T
 
 ## Triển khai tham chiếu trên Kubernetes
 
-Các file này đến từ dự án upstream [lehuyphuong/LLM-MedQA-Assistant](https://github.com/lehuyphuong/LLM-MedQA-Assistant) (phần lớn chart giống hệt đến từng byte) và không được giữ đồng bộ với stack compose. Chúng chưa được kiểm chứng end to end.
+Các file này có từ phiên bản đầu tiên của dự án và không được giữ đồng bộ với stack compose. Chúng chưa được kiểm chứng end to end.
 
 | Thành phần | Nội dung | Trạng thái |
 |---|---|---|
@@ -402,6 +400,6 @@ Các file này đến từ dự án upstream [lehuyphuong/LLM-MedQA-Assistant](h
 
 - [docs/data/workflow.md](docs/data/workflow.md): cấu trúc dữ liệu, quy ước đặt tên và các lệnh pipeline.
 - [docs/architecture/retrieval-deep-dive.md](docs/architecture/retrieval-deep-dive.md): hướng dẫn retrieval từng bước (tiếng Việt).
-- [charts/README.md](charts/README.md): ghi chú thiết kế Helm chart từ dự án upstream; một số nội dung, chẳng hạn lưu trữ dựa trên PVC, không khớp với các template.
-- [ci/README.md](ci/README.md): ghi chú cài đặt Jenkins từ dự án upstream (chỉ có văn bản; các ảnh chụp màn hình được nhắc đến trong đó không có trong repository này).
+- [charts/README.md](charts/README.md): ghi chú thiết kế Helm chart; một số nội dung, chẳng hạn lưu trữ dựa trên PVC, không khớp với các template.
+- [ci/README.md](ci/README.md): ghi chú cài đặt Jenkins (chỉ có văn bản; các ảnh chụp màn hình được nhắc đến trong đó không có trong repository này).
 - Đánh giá: [jprosun/vi-medrag-audit](https://github.com/jprosun/vi-medrag-audit). Để trích dẫn paper hoặc artifact, hãy dùng [CITATION.cff](https://github.com/jprosun/vi-medrag-audit/blob/HEAD/CITATION.cff) của nó.

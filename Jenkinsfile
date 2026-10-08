@@ -83,8 +83,8 @@ pipeline {
               export PATH=$SONAR_SCANNER_HOME/bin:$PATH
 
               sonar-scanner \
-                -Dsonar.organization=lehuyphuong \
-                -Dsonar.projectKey=lehuyphuong_LLM-MedQA-Assistant
+                -Dsonar.organization=jprosun \
+                -Dsonar.projectKey=jprosun_Medical-RAG-Platform
             '''
           }
         }

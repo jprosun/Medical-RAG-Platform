@@ -35,7 +35,7 @@ from .source_registry import SOURCE_REGISTRY, SourceConfig
 
 USER_AGENT = (
     "MedQA-RAG-Crawl/1.0 (academic research; "
-    "https://github.com/lehuyphuong/LLM-MedQA-Assistant)"
+    "https://github.com/jprosun/Medical-RAG-Platform)"
 )
 REQUEST_TIMEOUT = 60
 WHO_DISCOVERY_URLS = [

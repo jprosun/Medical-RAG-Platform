@@ -51,7 +51,7 @@ WHO_FACT_SHEETS_URL = "https://www.who.int/news-room/fact-sheets"
 WHO_BASE = "https://www.who.int"
 USER_AGENT = (
     "MedQA-RAG-ETL/1.0 (academic research; "
-    "https://github.com/lehuyphuong/LLM-MedQA-Assistant)"
+    "https://github.com/jprosun/Medical-RAG-Platform)"
 )
 _config = {"delay": 2.0}  # mutable so main() can update
 REQUEST_TIMEOUT = 30

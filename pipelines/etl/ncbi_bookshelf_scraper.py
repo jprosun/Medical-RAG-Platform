@@ -79,7 +79,7 @@ MEDICAL_TOPICS = [
 
 USER_AGENT = (
     "MedQA-RAG-ETL/1.0 (academic research; "
-    "https://github.com/lehuyphuong/LLM-MedQA-Assistant)"
+    "https://github.com/jprosun/Medical-RAG-Platform)"
 )
 _config = {"delay": 0.5}  # mutable so main() can update
 REQUEST_TIMEOUT = 30

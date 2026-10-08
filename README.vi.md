@@ -401,5 +401,5 @@ Các file này có từ phiên bản đầu tiên của dự án và không đư
 - [docs/data/workflow.md](docs/data/workflow.md): cấu trúc dữ liệu, quy ước đặt tên và các lệnh pipeline.
 - [docs/architecture/retrieval-deep-dive.md](docs/architecture/retrieval-deep-dive.md): hướng dẫn retrieval từng bước (tiếng Việt).
 - [charts/README.md](charts/README.md): ghi chú thiết kế Helm chart; một số nội dung, chẳng hạn lưu trữ dựa trên PVC, không khớp với các template.
-- [ci/README.md](ci/README.md): ghi chú cài đặt Jenkins (chỉ có văn bản; các ảnh chụp màn hình được nhắc đến trong đó không có trong repository này).
+- [ci/README.md](ci/README.md): ghi chú cài đặt Jenkins.
 - Đánh giá: [jprosun/vi-medrag-audit](https://github.com/jprosun/vi-medrag-audit). Để trích dẫn paper hoặc artifact, hãy dùng [CITATION.cff](https://github.com/jprosun/vi-medrag-audit/blob/HEAD/CITATION.cff) của nó.

@@ -65,7 +65,7 @@ python -m pipelines.etl.ncbi_bookshelf_scraper
 Examples:
 
 ```powershell
-python tools/extract_digital_pdf.py
+python -m tools.extract_digital_pdf
 python -m pipelines.etl.vn.vmj_issue_splitter
 ```
 

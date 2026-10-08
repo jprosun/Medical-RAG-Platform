@@ -9,14 +9,14 @@ After the Kaggle notebook finishes, download these files from Kaggle Output:
 Put them in one local folder, for example:
 
 ```powershell
-D:\CODE\DATN\kaggle-output\medqa_release_v3_all_open_enriched
+C:\path	o\kaggle-output\medqa_release_v3_all_open_enriched
 ```
 
 Finalize and audit the artifacts:
 
 ```powershell
 python tools\kaggle\finalize_kaggle_embedding_artifacts.py `
-  --input-dir D:\CODE\DATN\kaggle-output\medqa_release_v3_all_open_enriched `
+  --input-dir C:\path	o\kaggle-output\medqa_release_v3_all_open_enriched `
   --overwrite
 ```
 

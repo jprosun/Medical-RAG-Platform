@@ -401,5 +401,5 @@ These files date from the project's initial version and have not been kept in sy
 - [docs/data/workflow.md](docs/data/workflow.md): data layout, naming contract and pipeline commands.
 - [docs/architecture/retrieval-deep-dive.md](docs/architecture/retrieval-deep-dive.md): step-by-step retrieval walkthrough (Vietnamese).
 - [charts/README.md](charts/README.md): Helm chart design notes; some statements, such as PVC-backed storage, do not match the templates.
-- [ci/README.md](ci/README.md): Jenkins setup notes (text only; the screenshots it references are not in this repository).
+- [ci/README.md](ci/README.md): Jenkins setup notes.
 - Evaluation: [jprosun/vi-medrag-audit](https://github.com/jprosun/vi-medrag-audit). To cite the paper or the artifact, use its [CITATION.cff](https://github.com/jprosun/vi-medrag-audit/blob/HEAD/CITATION.cff).

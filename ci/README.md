@@ -93,7 +93,6 @@ AND CTRL + D TO EXIT CONTAINER
 ```
 From here, open link localhost: [8080](http://localhost:8080/), pass the password, you will see Jenkin UI
 ### 7. **Install Required Jenkins Plugins**
-![](/assets/imgs/Plugins.png)
 
 ### 8. **Authenticate Jenkins with Google Cloud (One-Time)**
 ```code
@@ -110,8 +109,6 @@ docker start jenkins
 ```code
 ngrok http 8080
 ```  
-
-![](/assets/imgs/ngrok.png)  
 
 ### 11. **Back to previous terminal, create GCP Service Account for Jenkins**
 ```code
@@ -136,46 +133,32 @@ gcloud iam service-accounts keys create jenkins-gke.json \
   --iam-account jenkins-deployer@medqa-student-project.iam.gserviceaccount.com
 ```
 ### 14. **In Jenkins UI store credentials in Jenkins**
-![](/assets/imgs/Store_credential_in_jenkins.png)
 
 ### 15. **Link github to jenkin**
 Back to github, access setting -> webhook -> add new github link  
-![](/assets/imgs/Webhook.png)
 
 In the `which events would you like to trigger this webhook`, select `let me select individual events`, then select:
-![](/assets/imgs/pull_push.png)
 
 Create a job -> Select `multibranch pipeline`, Click OK
-![](/assets/imgs/Create_new_job.png)
 
 Add credentials  
-![](/assets/imgs/github_credential.png)
-
 
 ### 16. **Setup SonarQube**
 Create a SonarQube cloud account, and link to github repository (Follow this guide: [Documentations](https://docs.sonarsource.com/sonarqube-cloud/getting-started/github))  
 
 Once done github connection, create "New Analyze"  
-![](/assets/imgs/Sonar_create_new_analyze.png)  
 
 Select repo to analyze, then click "Set Up"  
-![](/assets/imgs/Sonar_select_new_repo_to_analyze.png)  
 
 Choose CI configuration, follow instructions to setup and update Jenkinsfile (stage: 'Static Code Analysis - SonarQube')  
-![](/assets/imgs/Sonar_setup_instruction.png)  
 
 Create Quality Gate  
-![](/assets/imgs/Sonar_create_quality_gate.png)  
 
 In Jenkin UI, add a global credential  
-![](/assets/imgs/Sonar_add_credential.png)  
 
 Install Sonar plugins  
-![](/assets/imgs/Sonar_installed_plugins.png)  
 
 In Jenkin UI, configure Sonar configuration  
-![](/assets/imgs/Sonar_Jenkin_system_configuration.png)  
-
 
 ### 17. **NeMo Guardrails**  
 This step is already done while deploy model-serving namespace.

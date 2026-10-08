@@ -63,6 +63,12 @@ benchmark/datasets/test_results/*
 benchmark/runners/*
 !benchmark/runners/run_topic_gold_eval.py
 !benchmark/runners/score_topic_gold.py
+!benchmark/runners/run_full_gold_eval.py
+!benchmark/runners/score_semantic_lite.py
+!benchmark/synthetic_gold_pipeline/
+benchmark/synthetic_gold_pipeline/*
+!benchmark/synthetic_gold_pipeline/*.py
+!benchmark/synthetic_gold_pipeline/*.txt
 notebooks/
 *.json
 *.html
@@ -80,5 +86,6 @@ notebooks/
 !package.json
 !package-lock.json
 !tsconfig.json
+!services/web-ui/index.html
 
 # Allow specific json config files if tracked
